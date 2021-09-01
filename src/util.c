@@ -30,13 +30,19 @@
 #include <unistd.h>
 #endif
 
-#include <stdint.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __WIN32__
+#include "io/vio_win32.h" // for windows.h, WIDE_PATHS, and utf16_to_utf8
+#endif
+
 #include "const.h" // for MAX_PATH
 #include "error.h"
-#include "memcasecmp.h" // memtolower
+#include "platform.h"
+#include "io/path.h"
+#include "io/vio.h"
 
 struct mzx_resource
 {
@@ -59,6 +65,7 @@ struct mzx_resource
 static struct mzx_resource mzx_res[] =
 {
 #define ASSETS "assets/"
+  { "(binpath)",                        NULL, false, true },
   { CONFFILE,                           NULL, false, false },
   { ASSETS "default.chr",               NULL, false, false },
   { ASSETS "edit.chr",                  NULL, false, false },
@@ -67,6 +74,7 @@ static struct mzx_resource mzx_res[] =
   { ASSETS "ascii.chr",                 NULL, true,  false },
   { ASSETS "blank.chr",                 NULL, true,  false },
   { ASSETS "smzx.chr",                  NULL, true,  false },
+  { ASSETS "smzx2.chr",                 NULL, true,  false },
 #endif
 #ifdef CONFIG_HELPSYS
   { ASSETS "help.fil",                  NULL, false, true },
@@ -92,14 +100,28 @@ static struct mzx_resource mzx_res[] =
 
 #ifdef CONFIG_CHECK_ALLOC
 
+static platform_thread_id main_thread_id;
+
+void check_alloc_init(void)
+{
+  main_thread_id = platform_get_thread_id();
+}
+
 static void out_of_memory_check(void *p, const char *file, int line)
 {
   char msgbuf[128];
   if(!p)
   {
-    snprintf(msgbuf, sizeof(msgbuf), "Out of memory in %s:%d", file, line);
-    msgbuf[sizeof(msgbuf)-1] = '\0';
-    error(msgbuf, ERROR_T_FATAL, ERROR_OPT_EXIT|ERROR_OPT_NO_HELP, 0);
+    platform_thread_id cur_thread_id = platform_get_thread_id();
+    if(platform_is_same_thread(cur_thread_id, main_thread_id))
+    {
+      snprintf(msgbuf, sizeof(msgbuf), "Out of memory in %s:%d", file, line);
+      msgbuf[sizeof(msgbuf)-1] = '\0';
+      error(msgbuf, ERROR_T_FATAL, ERROR_OPT_EXIT|ERROR_OPT_NO_HELP, 0);
+    }
+    else
+      warn("Out of memory in in %s:%d (thread %zu)\n",
+       file, line, (size_t)cur_thread_id);
   }
 }
 
@@ -126,32 +148,77 @@ void *check_realloc(void *ptr, size_t size, const char *file, int line)
 
 #endif /* CONFIG_CHECK_ALLOC */
 
+// Determine the executable dir.
+static ssize_t find_executable_dir(char *dest, size_t dest_len, const char *argv0)
+{
+#ifdef __WIN32__
+  {
+    // Windows may not reliably give a full path in argv[0]. Fortunately,
+    // there's a Windows solution for this.
+    HMODULE module = GetModuleHandle(NULL);
+    char filename[MAX_PATH];
+
+#ifdef WIDE_PATHS
+    wchar_t filename_wide[MAX_PATH];
+    DWORD ret = GetModuleFileNameW(module, filename_wide, MAX_PATH);
+
+    if(ret > 0 && ret < MAX_PATH)
+    {
+      if(!utf16_to_utf8(filename_wide, filename, MAX_PATH))
+        ret = 0;
+    }
+#else /* !WIDE_PATHS */
+    DWORD ret = GetModuleFileNameA(module, filename, MAX_PATH);
+#endif
+
+    if(ret > 0 && ret < MAX_PATH)
+    {
+      ssize_t len = path_get_directory(dest, dest_len, filename);
+      if(len > 0)
+        return len;
+    }
+
+    warn("--RES-- Failed to get executable path from Win32\n");
+  }
+#endif /* __WIN32__ */
+
+  if(argv0)
+  {
+    ssize_t len = path_get_directory(dest, dest_len, argv0);
+    if(len > 0)
+    {
+      // Change to the executable dir and get it as an absolute path.
+      if(!vchdir(dest) && vgetcwd(dest, dest_len))
+        return strlen(dest);
+    }
+
+    warn("--RES-- Failed to get executable path from argv[0]: %s\n", argv0);
+  }
+  else
+    warn("--RES-- Failed to get executable path from argv[0]: (null)\n");
+
+  dest[0] = 0;
+  return 0;
+}
+
 int mzx_res_init(const char *argv0, boolean editor)
 {
-  size_t i, bin_path_len = 0;
+  int i;
+  ssize_t bin_path_len;
   struct stat file_info;
-  char *full_path_base;
   char *full_path;
   char *bin_path;
-  ssize_t g_ret;
   char *p_dir;
   int ret = 0;
 
-  full_path_base = cmalloc(MAX_PATH);
   bin_path = cmalloc(MAX_PATH);
   p_dir = cmalloc(MAX_PATH);
 
-  g_ret = get_path(argv0, bin_path, MAX_PATH);
-  if(g_ret > 0)
+  bin_path_len = find_executable_dir(bin_path, MAX_PATH, argv0);
+  if(bin_path_len > 0)
   {
-    // move and convert to absolute path style
-    chdir(bin_path);
-    getcwd(bin_path, MAX_PATH);
-    bin_path_len = strlen(bin_path);
-
-    // append the trailing '/'
-    bin_path[bin_path_len++] = '/';
-    bin_path[bin_path_len] = 0;
+    // Shrink the allocation...
+    bin_path = crealloc(bin_path, bin_path_len + 1);
   }
   else
   {
@@ -169,36 +236,35 @@ int mzx_res_init(const char *argv0, boolean editor)
   for(i = 0; i < END_RESOURCE_ID_T; i++)
   {
     size_t base_name_len = strlen(mzx_res[i].base_name);
+    size_t full_path_len;
     size_t p_dir_len;
 
-    if(i == CONFIG_TXT)
-      chdir(CONFDIR);
-    else
-      chdir(SHAREDIR);
+    if(i == MZX_EXECUTABLE_DIR)
+    {
+      // Special--this was already determined above if applicable.
+      mzx_res[i].path = bin_path;
+      continue;
+    }
 
-    getcwd(p_dir, MAX_PATH);
+    if(i == CONFIG_TXT)
+      vchdir(CONFDIR);
+    else
+      vchdir(SHAREDIR);
+
+    vgetcwd(p_dir, MAX_PATH);
     p_dir_len = strlen(p_dir);
 
-    // if we can't add the path we should really fail hard
-    if(p_dir_len + base_name_len + 1 >= MAX_PATH)
-      continue;
+    full_path_len = p_dir_len + base_name_len + 2;
+    full_path = cmalloc(full_path_len);
 
-    // append the trailing '/'
-    p_dir[p_dir_len++] = '/';
-    p_dir[p_dir_len] = 0;
-
-    memcpy(full_path_base, p_dir, p_dir_len);
-    memcpy(full_path_base + p_dir_len, mzx_res[i].base_name, base_name_len);
-    full_path_base[p_dir_len + base_name_len] = 0;
-
-    full_path = cmalloc(MAX_PATH);
-    clean_path_slashes(full_path_base, full_path, MAX_PATH);
-
-    // Attempt to load it from this new path
-    if(!stat(full_path, &file_info))
+    // The provided buffer should always be big enough, but check anyway.
+    if(path_join(full_path, full_path_len, p_dir, mzx_res[i].base_name) > 0)
     {
-      mzx_res[i].path = full_path;
-      continue;
+      if(!vstat(full_path, &file_info))
+      {
+        mzx_res[i].path = full_path;
+        continue;
+      }
     }
 
     free(full_path);
@@ -206,14 +272,19 @@ int mzx_res_init(const char *argv0, boolean editor)
     // Try to locate the resource relative to the bin_path
     if(bin_path)
     {
-      chdir(bin_path);
-      if(!stat(mzx_res[i].base_name, &file_info))
+      vchdir(bin_path);
+      if(!vstat(mzx_res[i].base_name, &file_info))
       {
-        mzx_res[i].path = cmalloc(bin_path_len + base_name_len + 1);
-        memcpy(mzx_res[i].path, bin_path, bin_path_len);
-        memcpy(mzx_res[i].path + bin_path_len,
-         mzx_res[i].base_name, base_name_len);
-        mzx_res[i].path[bin_path_len + base_name_len] = 0;
+        full_path_len = bin_path_len + base_name_len + 2;
+        full_path = cmalloc(full_path_len);
+
+        // The provided buffer should always be big enough, but check anyway.
+        if(path_join(full_path, full_path_len, bin_path, mzx_res[i].base_name) > 0)
+        {
+          mzx_res[i].path = full_path;
+          continue;
+        }
+        free(full_path);
       }
     }
   }
@@ -237,11 +308,11 @@ int mzx_res_init(const char *argv0, boolean editor)
        mzx_res[i].base_name);
       ret = 1;
     }
+    else
+      trace("--RES-- %d -> %s\n", i, mzx_res[i].path);
   }
 
   free(p_dir);
-  free(bin_path);
-  free(full_path_base);
   return ret;
 }
 
@@ -258,47 +329,47 @@ void mzx_res_free(void)
 static unsigned char copy_buffer[COPY_BUFFER_SIZE];
 #endif
 
-char *mzx_res_get_by_id(enum resource_id id)
+const char *mzx_res_get_by_id(enum resource_id id)
 {
 #ifdef USERCONFFILE
   static char userconfpath[MAX_PATH];
   if(id == CONFIG_TXT)
   {
-    FILE *fp;
+    vfile *vf;
 
     // Special handling for CONFIG_TXT to allow for user
     // configuration files
     snprintf(userconfpath, MAX_PATH, "%s/%s", getenv("HOME"), USERCONFFILE);
 
     // Check if the file can be opened for reading
-    fp = fopen_unsafe(userconfpath, "rb");
+    vf = vfopen_unsafe(userconfpath, "rb");
 
-    if(fp)
+    if(vf)
     {
-      fclose(fp);
+      vfclose(vf);
       return (char *)userconfpath;
     }
     // Otherwise, try to open the file for writing
-    fp = fopen_unsafe(userconfpath, "wb");
-    if(fp)
+    vf = vfopen_unsafe(userconfpath, "wb");
+    if(vf)
     {
-      FILE *original = fopen_unsafe(mzx_res[id].path, "rb");
+      vfile *original = vfopen_unsafe(mzx_res[id].path, "rb");
       if(original)
       {
         size_t bytes_read;
         for(;;)
         {
-          bytes_read = fread(copy_buffer, 1, COPY_BUFFER_SIZE, original);
+          bytes_read = vfread(copy_buffer, 1, COPY_BUFFER_SIZE, original);
           if(bytes_read)
-            fwrite(copy_buffer, 1, bytes_read, fp);
+            vfwrite(copy_buffer, 1, bytes_read, vf);
           else
             break;
         }
-        fclose(fp);
-        fclose(original);
+        vfclose(vf);
+        vfclose(original);
         return (char *)userconfpath;
       }
-      fclose(fp);
+      vfclose(vf);
     }
 
     // If that's no good, just read the normal config file
@@ -307,113 +378,101 @@ char *mzx_res_get_by_id(enum resource_id id)
   return mzx_res[id].path;
 }
 
+#ifdef CONFIG_STDIO_REDIRECT
+
+FILE *mzxout_h = NULL;
+FILE *mzxerr_h = NULL;
+
 /**
  * Some platforms may not be able to display console output without extra work.
- * On these platforms redirect STDIO to files so the console output is easier
- * to read.
+ * On these platforms, open stdout/stderr replacement files instead. The log
+ * macros and any other references to `mzxout` and `mzxerr` will use these
+ * files instead of stdio.
+ *
+ * Previously, this was implemented using `freopen` on stdout/stderr, but
+ * doing this in some console SDKs does not work correctly (NDS, PS Vita).
  */
-boolean redirect_stdio(const char *base_path, boolean require_conf)
+boolean redirect_stdio_init(const char *base_path, boolean require_conf)
 {
-  char clean_path[MAX_PATH];
   char dest_path[MAX_PATH];
+  size_t dest_len;
   FILE *fp_wr;
   uint64_t t;
 
   if(!base_path)
     return false;
 
-  clean_path_slashes(base_path, clean_path, MAX_PATH);
+  dest_len = path_clean_slashes_copy(dest_path, MAX_PATH - 10, base_path);
 
   if(require_conf)
   {
     // If the config file is required, attempt to stat it.
     struct stat stat_info;
 
-    join_path_names(dest_path, MAX_PATH, clean_path, "config.txt");
-    if(stat(dest_path, &stat_info))
+    path_append(dest_path, MAX_PATH, "config.txt");
+    if(vstat(dest_path, &stat_info))
       return false;
+    dest_path[dest_len] = '\0';
   }
+
+  // Clean up existing handles from a previous attempt.
+  redirect_stdio_exit();
 
   // Test directory for write access.
-  join_path_names(dest_path, MAX_PATH, clean_path, "stdout.txt");
+  path_append(dest_path, MAX_PATH, "stdout.txt");
   fp_wr = fopen_unsafe(dest_path, "w");
-  if(fp_wr)
+  if(!fp_wr)
   {
-    t = (uint64_t)time(NULL);
-
-    // Redirect stdout to stdout.txt.
-    fclose(fp_wr);
-    fprintf(stdout, "Redirecting logs to '%s'...\n", dest_path);
-    if(freopen(dest_path, "w", stdout))
-      fprintf(stdout, "MegaZeux: Logging to '%s' (%" PRIu64 ")\n", dest_path, t);
-    else
-      fprintf(stdout, "Failed to redirect stdout\n");
-
-    // Redirect stderr to stderr.txt.
-    join_path_names(dest_path, MAX_PATH, clean_path, "stderr.txt");
-    fprintf(stderr, "Redirecting logs to '%s'...\n", dest_path);
-    if(freopen(dest_path, "w", stderr))
-      fprintf(stderr, "MegaZeux: Logging to '%s' (%" PRIu64 ")\n", dest_path, t);
-    else
-      fprintf(stderr, "Failed to redirect stderr\n");
-
-    return true;
+    fprintf(stdout, "Failed to redirect stdout\n");
+    fflush(stdout);
+    return false;
   }
-  return false;
+
+  t = (uint64_t)time(NULL);
+
+  // Redirect mzxout to stdout.txt.
+  fprintf(stdout, "Redirecting logs to '%s'...\n", dest_path);
+  fflush(stdout);
+  mzxout_h = fp_wr;
+  fprintf(mzxout, "MegaZeux: Logging to '%s' (%" PRIu64 ")\n", dest_path, t);
+  fflush(mzxout);
+
+  // Redirect mzxerr to stderr.txt.
+  dest_path[dest_len] = '\0';
+  path_append(dest_path, MAX_PATH, "stderr.txt");
+  fp_wr = fopen_unsafe(dest_path, "w");
+  if(!fp_wr)
+  {
+    fprintf(stderr, "Failed to redirect stderr\n");
+    fflush(stderr);
+    return false;
+  }
+
+  fprintf(stderr, "Redirecting logs to '%s'...\n", dest_path);
+  fflush(stderr);
+  mzxerr_h = fp_wr;
+  fprintf(mzxerr, "MegaZeux: Logging to '%s' (%" PRIu64 ")\n", dest_path, t);
+  fflush(mzxerr);
+
+  return true;
 }
 
-// Get 2 bytes, little endian
-
-int fgetw(FILE *fp)
+void redirect_stdio_exit(void)
 {
-  int a = fgetc(fp), b = fgetc(fp);
-  if((a == EOF) || (b == EOF))
-    return EOF;
+  if(mzxout_h)
+  {
+    fclose(mzxout_h);
+    mzxout_h = NULL;
+  }
 
-  return (b << 8) | a;
+  if(mzxerr_h)
+  {
+    fclose(mzxerr_h);
+    mzxerr_h = NULL;
+  }
 }
 
-// Get 4 bytes, little endian
-
-int fgetd(FILE *fp)
-{
-  int a = fgetc(fp), b = fgetc(fp), c = fgetc(fp), d = fgetc(fp);
-  if((a == EOF) || (b == EOF) || (c == EOF) || (d == EOF))
-    return EOF;
-
-  return (d << 24) | (c << 16) | (b << 8) | a;
-}
-
-// Put 2 bytes, little endian
-
-void fputw(int src, FILE *fp)
-{
-  fputc(src & 0xFF, fp);
-  fputc(src >> 8, fp);
-}
-
-// Put 4 bytes, little endian
-
-void fputd(int src, FILE *fp)
-{
-  fputc(src & 0xFF, fp);
-  fputc((src >> 8) & 0xFF, fp);
-  fputc((src >> 16) & 0xFF, fp);
-  fputc((src >> 24) & 0xFF, fp);
-}
-
-// Determine file size of an open FILE and rewind it
-
-long ftell_and_rewind(FILE *f)
-{
-  long size;
-
-  fseek(f, 0, SEEK_END);
-  size = ftell(f);
-  rewind(f);
-
-  return size;
-}
+#endif /* CONFIG_STDIO_REDIRECT */
 
 // Random function, returns an integer [0-range)
 
@@ -446,457 +505,8 @@ unsigned int Random(uint64_t range)
   x ^= x << 25; // b
   x ^= x >> 27; // c
   rng_state = x;
-  return ((x * 0x2545F4914F6CDD1D) >> 32) * range / 0xFFFFFFFF;
+  return (((x * 0x2545F4914F6CDD1D) >> 32) * range) >> 32;
 }
-
-// FIXME: This function should probably die. It's unsafe.
-void add_ext(char *src, const char *ext)
-{
-  size_t src_len = strlen(src);
-  size_t ext_len = strlen(ext);
-
-  if((src_len < ext_len) || (src[src_len - ext_len] != '.') ||
-   strcasecmp(src + src_len - ext_len, ext))
-  {
-    if(src_len + ext_len >= MAX_PATH)
-      src_len = MAX_PATH - ext_len - 1;
-
-    snprintf(src + src_len, MAX_PATH - src_len, "%s", ext);
-    src[MAX_PATH - 1] = '\0';
-  }
-}
-
-int get_ext_pos(const char *filename)
-{
-  int filename_length = strlen(filename);
-  int ext_pos;
-
-  for(ext_pos = filename_length - 1; ext_pos >= 0; ext_pos--)
-    if(filename[ext_pos] == '.')
-      break;
-
-  return ext_pos;
-}
-
-__utils_maybe_static ssize_t __get_path(const char *file_name, char *dest,
- unsigned int buf_len)
-{
-  ssize_t c = (ssize_t)strlen(file_name) - 1;
-
-  // no path, or it's too long to store
-  if(c == -1 || c > (int)buf_len)
-  {
-    if(buf_len > 0)
-      dest[0] = 0;
-    return -1;
-  }
-
-  while((file_name[c] != '/') && (file_name[c] != '\\') && c)
-    c--;
-
-  if(c > 0)
-    memcpy(dest, file_name, c);
-  dest[c] = 0;
-
-  return c;
-}
-
-ssize_t get_path(const char *file_name, char *dest, unsigned int buf_len)
-{
-  return __get_path(file_name, dest, buf_len);
-}
-
-static int isslash(char n)
-{
-  return n=='\\' || n=='/';
-}
-
-void clean_path_slashes(const char *src, char *dest, size_t buf_size)
-{
-  unsigned int i = 0;
-  unsigned int p = 0;
-  size_t src_len = strlen(src);
-
-  while((i < src_len) && (p < buf_size-1))
-  {
-    if(isslash(src[i]))
-    {
-      while(isslash(src[i]))
-        i++;
-
-      dest[p] = DIR_SEPARATOR_CHAR;
-      p++;
-    }
-    else
-    {
-      dest[p] = src[i];
-      i++;
-      p++;
-    }
-  }
-  dest[p] = '\0';
-
-  if((p >= 2) && (dest[p-1] == DIR_SEPARATOR_CHAR) && (dest[p-2] != ':'))
-    dest[p-1] = '\0';
-}
-
-void split_path_filename(const char *source,
- char *destpath, unsigned int dest_buffer_len,
- char *destfile, unsigned int file_buffer_len)
-{
-  char temppath[MAX_PATH];
-  struct stat path_info;
-  int stat_res = stat(source, &path_info);
-
-  // If the entirety of source is a directory
-  if((stat_res >= 0) && S_ISDIR(path_info.st_mode))
-  {
-    if(dest_buffer_len)
-      clean_path_slashes(source, destpath, dest_buffer_len);
-
-    if(file_buffer_len)
-      destfile[0] = '\0';
-  }
-  else
-  // If source has a directory and a file
-  if((source[0] != '\0') && get_path(source, temppath, MAX_PATH))
-  {
-    // get_path leaves off trailing /, add 1 to offset.
-    if(dest_buffer_len)
-      clean_path_slashes(temppath, destpath, dest_buffer_len);
-
-    if(file_buffer_len)
-      strncpy(destfile, &(source[strlen(temppath) + 1]), file_buffer_len);
-  }
-  // Source is just a file or blank.
-  else
-  {
-    if(dest_buffer_len)
-      destpath[0] = '\0';
-
-    if(file_buffer_len)
-      strncpy(destfile, source, file_buffer_len);
-  }
-}
-
-void join_path_names(char* target, int max_len, const char* path1, const char* path2)
-{
-  if(path1[strlen(path1)-1] == DIR_SEPARATOR_CHAR)
-    snprintf(target, max_len, "%s%s", path1, path2);
-  else
-    snprintf(target, max_len, "%s%s%s", path1, DIR_SEPARATOR, path2);
-}
-
-int create_path_if_not_exists(const char *filename)
-{
-  struct stat stat_info;
-  char parent_directory[MAX_PATH];
-
-  if(!get_path(filename, parent_directory, MAX_PATH))
-    return 1;
-
-  if(!stat(parent_directory, &stat_info))
-    return 2;
-
-  create_path_if_not_exists(parent_directory);
-
-  if(mkdir(parent_directory, 0755))
-    return 3;
-
-  return 0;
-}
-
-// Navigate a path name.
-int change_dir_name(char *path_name, const char *dest)
-{
-  struct stat stat_info;
-  char path_temp[MAX_PATH];
-  char path[MAX_PATH];
-  const char *current;
-  const char *next;
-  const char *end;
-  char current_char;
-  size_t len;
-
-  if(!dest || !dest[0])
-    return -1;
-
-  if(!path_name)
-    return -1;
-
-  current = dest;
-  end = dest + strlen(dest);
-
-  next = strchr(dest, ':');
-  if(next)
-  {
-    /**
-     * Destination starts with a Windows-style root directory.
-     * Aside from Windows, these are often used by console SDKs (albeit with /
-     * instead of \) to distinguish SD cards and the like.
-     */
-    if(next[1] != DIR_SEPARATOR_CHAR && next[1] != 0)
-      return -1;
-
-    snprintf(path, MAX_PATH, "%.*s" DIR_SEPARATOR, (int)(next - dest + 1),
-     dest);
-    path[MAX_PATH - 1] = '\0';
-
-    if(stat(path, &stat_info) < 0)
-      return -1;
-
-    current = next + 1;
-    if(current[0] == DIR_SEPARATOR_CHAR)
-      current++;
-  }
-  else
-
-  if(dest[0] == DIR_SEPARATOR_CHAR)
-  {
-    /**
-     * Destination starts with a Unix-style root directory.
-     * Aside from Unix-likes, these are also supported by console platforms.
-     * Even Windows (back through XP at least) doesn't seem to mind them.
-     */
-    snprintf(path, MAX_PATH, DIR_SEPARATOR);
-    current = dest + 1;
-  }
-
-  else
-  {
-    /**
-     * Destination is relative--start from the current path. Make sure there's
-     * a trailing separator.
-     */
-    if(path_name[strlen(path_name) - 1] != DIR_SEPARATOR_CHAR)
-      snprintf(path, MAX_PATH, "%s" DIR_SEPARATOR, path_name);
-
-    else
-      snprintf(path, MAX_PATH, "%s", path_name);
-  }
-
-  path[MAX_PATH - 1] = '\0';
-  current_char = current[0];
-  len = strlen(path);
-
-  // Apply directory fragments to the path.
-  while(current_char != 0)
-  {
-    // Increment next to skip the separator so it will be copied over.
-    next = strchr(current, DIR_SEPARATOR_CHAR);
-    if(!next) next = end;
-    else      next++;
-
-    // . does nothing, .. goes back one level
-    if(current_char == '.')
-    {
-      if(current[1] == '.')
-      {
-        // Skip the rightmost separator (current level) and look for the
-        // previous separator. If found, truncate the path to it.
-        char *pos = path + len - 1;
-        do
-        {
-          pos--;
-        }
-        while(pos >= path && *pos != DIR_SEPARATOR_CHAR);
-
-        if(pos >= path)
-        {
-          pos[1] = 0;
-          len = strlen(path);
-        }
-      }
-    }
-    else
-    {
-      snprintf(path + len, MAX_PATH - len, "%.*s", (int)(next - current),
-       current);
-      path[MAX_PATH - 1] = '\0';
-      len = strlen(path);
-    }
-
-    current = next;
-    current_char = current[0];
-  }
-
-  // This needs to be done before the stat for some platforms (e.g. 3DS)
-  clean_path_slashes(path, path_temp, MAX_PATH);
-  if(stat(path_temp, &stat_info) >= 0)
-  {
-    snprintf(path_name, MAX_PATH, "%s", path_temp);
-    return 0;
-  }
-
-  return -1;
-}
-
-// Index must be an array of 256 ints
-void boyer_moore_index(const void *B, const size_t b_len,
- int index[256], boolean ignore_case)
-{
-  char *b = (char *)B;
-  int i;
-
-  char *s = b;
-  char *last = b + b_len - 1;
-
-  for(i = 0; i < 256; i++)
-    index[i] = b_len;
-
-  if(!ignore_case)
-  {
-    for(s = b; s < last; s++)
-      index[(int)*s] = last - s;
-  }
-  else
-  {
-    for(s = b; s < last; s++)
-      index[memtolower((int)*s)] = last - s;
-
-    // Duplicating the lowercase values over the uppercase values helps avoid
-    // an extra tolower in the search function.
-    memcpy(index + 'A', index + 'a', sizeof(int) * 26);
-  }
-}
-
-// Search for substring B in haystack A. The index greatly increases the
-// search speed, especially for large needles. This is actually a reduced
-// Boyer-Moore search, as the original version uses two separate indexes.
-void *boyer_moore_search(const void *A, const size_t a_len,
- const void *B, const size_t b_len, const int index[256], boolean ignore_case)
-{
-  const unsigned char *a = (const unsigned char *)A;
-  const unsigned char *b = (const unsigned char *)B;
-  size_t i = b_len - 1;
-  size_t idx;
-  int j;
-  if(!ignore_case)
-  {
-    while(i < a_len)
-    {
-      j = b_len - 1;
-
-      while(j >= 0 && a[i] == b[j])
-        j--, i--;
-
-      if(j == -1)
-        return (void *)(a + i + 1);
-
-      idx = index[(int)a[i]];
-      i += MAX(b_len - j, idx);
-    }
-  }
-  else
-  {
-    while(i < a_len)
-    {
-      j = b_len - 1;
-
-      while(j >= 0 && memtolower((int)a[i]) == memtolower((int)b[j]))
-        j--, i--;
-
-      if(j == -1)
-        return (void *)(a + i + 1);
-
-      idx = index[(int)a[i]];
-      i += MAX(b_len - j, idx);
-    }
-  }
-  return NULL;
-}
-
-
-int mem_getc(const unsigned char **ptr)
-{
-  int val = (*ptr)[0];
-  *ptr += 1;
-  return val;
-}
-
-int mem_getw(const unsigned char **ptr)
-{
-  int val = (*ptr)[0] | ((*ptr)[1] << 8);
-  *ptr += 2;
-  return val;
-}
-
-int mem_getd(const unsigned char **ptr)
-{
-  int val = (*ptr)[0] | ((*ptr)[1] << 8) | ((*ptr)[2] << 16) | ((int)((*ptr)[3]) << 24);
-  *ptr += 4;
-  return val;
-}
-
-void mem_putc(int src, unsigned char **ptr)
-{
-  (*ptr)[0] = src;
-  *ptr += 1;
-}
-
-void mem_putw(int src, unsigned char **ptr)
-{
-  (*ptr)[0] = src & 0xFF;
-  (*ptr)[1] = (src >> 8) & 0xFF;
-  *ptr += 2;
-}
-
-void mem_putd(int src, unsigned char **ptr)
-{
-  (*ptr)[0] = src & 0xFF;
-  (*ptr)[1] = (src >> 8) & 0xFF;
-  (*ptr)[2] = (src >> 16) & 0xFF;
-  (*ptr)[3] = (src >> 24) & 0xFF;
-  *ptr += 4;
-}
-
-
-// like fsafegets, except from memory.
-int memsafegets(char *dest, int size, char **src, char *end)
-{
-  char *pos = dest;
-  char *next = *src;
-  char *stop = MIN(end, next+size);
-  char ch;
-
-  // Return 0 if this is the end of the memory block
-  if(next == NULL)
-    return 0;
-
-  // Copy the memory until the end, the bound, or a newline
-  while(next<stop && (ch = *next)!='\n')
-  {
-    *pos = ch;
-    pos++;
-    next++;
-  }
-  *pos = 0;
-
-  // Place the counter where the next line begins
-  if(next < end)
-  {
-    *src = next + 1;
-  }
-
-  // Mark that this is the end
-  else
-  {
-    *src = NULL;
-  }
-
-  // Length at least 1 -- get rid of \r and \n
-  if(pos > dest)
-    if(pos[-1] == '\r' || pos[-1] == '\n')
-      pos[-1] = 0;
-
-  // Length at least 2 -- get rid of \r and \n
-  if(pos - 1 > dest)
-    if(pos[-2] == '\r' || pos[-2] == '\n')
-      pos[-2] = 0;
-
-  return 1;
-}
-
 
 #if defined(__WIN32__) && defined(__STRICT_ANSI__)
 
@@ -978,109 +588,6 @@ char *strsep(char **stringp, const char *delim)
 }
 
 #endif // __WIN32__ || __amigaos__
-
-long dir_tell(struct mzx_dir *dir)
-{
-  return dir->pos;
-}
-
-boolean dir_open(struct mzx_dir *dir, const char *path)
-{
-  dir->d = opendir(path);
-  if(!dir->d)
-    return false;
-
-  dir->entries = 0;
-  while(readdir(dir->d) != NULL)
-    dir->entries++;
-
-// pspdev/devkitPSP historically does not have a rewinddir implementation.
-// libctru (3DS) has rewinddir but it doesn't work. FIXME reason for the Switch?
-#if defined(CONFIG_PSP) || defined(CONFIG_3DS) || defined(CONFIG_SWITCH)
-  strncpy(dir->path, path, PATH_BUF_LEN);
-  dir->path[PATH_BUF_LEN - 1] = 0;
-  closedir(dir->d);
-  dir->d = opendir(path);
-#else
-  rewinddir(dir->d);
-#endif
-
-  dir->pos = 0;
-  return true;
-}
-
-void dir_close(struct mzx_dir *dir)
-{
-  if(dir->d)
-  {
-    closedir(dir->d);
-    dir->d = NULL;
-    dir->entries = 0;
-    dir->pos = 0;
-  }
-}
-
-void dir_seek(struct mzx_dir *dir, long offset)
-{
-  long i;
-
-  if(!dir->d)
-    return;
-
-  dir->pos = CLAMP(offset, 0L, dir->entries);
-
-// pspdev/devkitPSP historically does not have a rewinddir implementation.
-// libctru (3DS) has rewinddir but it doesn't work. FIXME reason for the Switch?
-#if defined(CONFIG_PSP) || defined(CONFIG_3DS) || defined(CONFIG_SWITCH)
-  closedir(dir->d);
-  dir->d = opendir(dir->path);
-  if(!dir->d)
-    return;
-#else
-  rewinddir(dir->d);
-#endif
-
-  for(i = 0; i < dir->pos; i++)
-    readdir(dir->d);
-}
-
-boolean dir_get_next_entry(struct mzx_dir *dir, char *entry, int *type)
-{
-  struct dirent *inode;
-
-  if(!dir->d)
-    return false;
-
-  dir->pos = MIN(dir->pos + 1, dir->entries);
-
-  inode = readdir(dir->d);
-  if(!inode)
-  {
-    entry[0] = 0;
-    return false;
-  }
-
-  if(type)
-  {
-#ifdef DT_UNKNOWN
-    /* On platforms that support it, the d_type field can be used to avoid
-     * stat calls. This is critical for the file manager on embedded platforms.
-     */
-    if(inode->d_type == DT_REG)
-      *type = DIR_TYPE_FILE;
-    else
-    if(inode->d_type == DT_DIR)
-      *type = DIR_TYPE_DIR;
-    else
-      *type = DIR_TYPE_UNKNOWN;
-#else
-    *type = DIR_TYPE_UNKNOWN;
-#endif
-  }
-
-  snprintf(entry, PATH_BUF_LEN, "%s", inode->d_name);
-  return true;
-}
 
 #if defined(__amigaos__)
 

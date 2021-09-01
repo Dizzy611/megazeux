@@ -43,19 +43,20 @@ __M_BEGIN_DECLS
 
 #define SGN(x) ((x > 0) - (x < 0))
 
-#ifndef DIR_SEPARATOR
-#ifdef __WIN32__
-#define DIR_SEPARATOR "\\"
-#define DIR_SEPARATOR_CHAR '\\'
-#else //!__WIN32__
-#define DIR_SEPARATOR "/"
-#define DIR_SEPARATOR_CHAR '/'
+#ifdef CONFIG_STDIO_REDIRECT
+CORE_LIBSPEC extern FILE *mzxout_h;
+CORE_LIBSPEC extern FILE *mzxerr_h;
+#define mzxout (mzxout_h ? mzxout_h : stdout)
+#define mzxerr (mzxerr_h ? mzxerr_h : stderr)
+#else
+#define mzxout stdout
+#define mzxerr stderr
 #endif
-#endif //DIR_SEPARATOR
 
 enum resource_id
 {
-  CONFIG_TXT = 0,
+  MZX_EXECUTABLE_DIR = 0,
+  CONFIG_TXT,
   MZX_DEFAULT_CHR,
   MZX_EDIT_CHR,
   SMZX_PAL,
@@ -63,6 +64,7 @@ enum resource_id
   MZX_ASCII_CHR,
   MZX_BLANK_CHR,
   MZX_SMZX_CHR,
+  MZX_SMZX2_CHR,
 #endif
 #ifdef CONFIG_HELPSYS
   MZX_HELP_FIL,
@@ -93,41 +95,17 @@ enum resource_id
 
 CORE_LIBSPEC int mzx_res_init(const char *argv0, boolean editor);
 CORE_LIBSPEC void mzx_res_free(void);
-CORE_LIBSPEC char *mzx_res_get_by_id(enum resource_id id);
+CORE_LIBSPEC const char *mzx_res_get_by_id(enum resource_id id);
 
-CORE_LIBSPEC boolean redirect_stdio(const char *base_path, boolean require_conf);
-
-// Code to load multi-byte ints from little endian file
-int fgetw(FILE *fp);
-CORE_LIBSPEC int fgetd(FILE *fp);
-void fputw(int src, FILE *fp);
-void fputd(int src, FILE *fp);
-
-CORE_LIBSPEC long ftell_and_rewind(FILE *f);
+#ifdef CONFIG_STDIO_REDIRECT
+CORE_LIBSPEC boolean redirect_stdio_init(const char *base_path, boolean require_conf);
+CORE_LIBSPEC void redirect_stdio_exit(void);
+#endif
 
 CORE_LIBSPEC void rng_seed_init(void);
 uint64_t rng_get_seed(void);
 void rng_set_seed(uint64_t seed);
 unsigned int Random(uint64_t range);
-
-CORE_LIBSPEC void add_ext(char *src, const char *ext);
-CORE_LIBSPEC int get_ext_pos(const char *filename);
-CORE_LIBSPEC ssize_t get_path(const char *file_name, char *dest, unsigned int buf_len);
-#ifdef CONFIG_UTILS
-ssize_t __get_path(const char *file_name, char *dest, unsigned int buf_len);
-#endif
-
-CORE_LIBSPEC void split_path_filename(const char *source,
- char *destpath, unsigned int path_buffer_len,
- char *destfile, unsigned int file_buffer_len);
-
-CORE_LIBSPEC int create_path_if_not_exists(const char *filename);
-
-CORE_LIBSPEC int change_dir_name(char *path_name, const char *dest);
-
-CORE_LIBSPEC void join_path_names(char* target, int max_len, const char* path1, const char* path2);
-
-CORE_LIBSPEC void clean_path_slashes(const char *source, char *dest, size_t buf_size);
 
 typedef void (*fn_ptr)(void);
 
@@ -138,46 +116,6 @@ struct dso_syms_map
 };
 
 #include <sys/types.h>
-#include <dirent.h>
-
-#define PATH_BUF_LEN MAX_PATH
-
-enum mzx_dir_type
-{
-  DIR_TYPE_UNKNOWN,
-  DIR_TYPE_FILE,
-  DIR_TYPE_DIR
-};
-
-struct mzx_dir {
-#if defined(CONFIG_PSP) || defined(CONFIG_3DS) || defined(CONFIG_SWITCH)
-  char path[PATH_BUF_LEN];
-#endif
-  DIR *d;
-  long entries;
-  long pos;
-};
-
-boolean dir_open(struct mzx_dir *dir, const char *path);
-void dir_close(struct mzx_dir *dir);
-void dir_seek(struct mzx_dir *dir, long offset);
-long dir_tell(struct mzx_dir *dir);
-boolean dir_get_next_entry(struct mzx_dir *dir, char *entry, int *type);
-
-CORE_LIBSPEC void boyer_moore_index(const void *B, const size_t b_len,
- int index[256], boolean ignore_case);
-CORE_LIBSPEC void *boyer_moore_search(const void *A, const size_t a_len,
- const void *B, const size_t b_len, const int index[256], boolean ignore_case);
-
-// Code to load/save multi-byte ints to/from little endian memory
-int mem_getc(const unsigned char **ptr);
-int mem_getd(const unsigned char **ptr);
-int mem_getw(const unsigned char **ptr);
-void mem_putc(int src, unsigned char **ptr);
-void mem_putd(int src, unsigned char **ptr);
-void mem_putw(int src, unsigned char **ptr);
-
-CORE_LIBSPEC int memsafegets(char *dest, int size, char **src, char *end);
 
 #if defined(__WIN32__) && defined(__STRICT_ANSI__)
 CORE_LIBSPEC int strcasecmp(const char *s1, const char *s2);
@@ -189,18 +127,11 @@ CORE_LIBSPEC char *strsep(char **stringp, const char *delim);
 #endif // __WIN32__ || __amigaos__
 
 #ifndef __WIN32__
-#if defined(CONFIG_PSP) || defined(CONFIG_GP2X) \
- || defined(CONFIG_NDS) || defined(CONFIG_WII) \
- || defined(CONFIG_3DS) || defined(CONFIG_SWITCH)
+// POSIX strcasecmp and strncasecmp are in strings.h,
+// which may or may not be included by string.h
 #include <string.h>
-#else
 #include <strings.h>
-#endif
 #endif // !__WIN32__
-
-#if defined(__WIN32__) && !defined(_MSC_VER)
-#define mkdir(file,mode) mkdir(file)
-#endif
 
 #if defined(__amigaos__)
 CORE_LIBSPEC extern long __stack_chk_guard[8];
@@ -220,43 +151,46 @@ CORE_LIBSPEC void __stack_chk_fail(void);
 #define debug(...) do { } while(0)
 #endif
 
-#elif defined(CONFIG_NDS) && !defined(CONFIG_STDIO_REDIRECT) /* ANDROID */
-
-// When the graphics have initialized, print to a debug buffer rather than the screen.
-void info(const char *format, ...)  __attribute__((format(printf, 1, 2)));
-void warn(const char *format, ...)  __attribute__((format(printf, 1, 2)));
-
-#ifdef DEBUG
-void debug(const char *format, ...) __attribute__((format(printf, 1, 2)));
+#if defined(DEBUG) && defined(DEBUG_TRACE)
+#define trace(...)  __android_log_print(ANDROID_LOG_VERBOSE, "MegaZeux", __VA_ARGS__)
 #else
-#define debug(...) do { } while(0)
+#define trace(...) do { } while(0)
 #endif
 
-#else /* ANDROID, CONFIG_NDS */
+#else /* ANDROID */
 
 #define info(...) \
  do { \
-   fprintf(stdout, "INFO: " __VA_ARGS__); \
-   fflush(stdout); \
+   fprintf(mzxout, "INFO: " __VA_ARGS__); \
+   fflush(mzxout); \
  } while(0)
 
 #define warn(...) \
  do { \
-   fprintf(stderr, "WARNING: " __VA_ARGS__); \
-   fflush(stderr); \
+   fprintf(mzxerr, "WARNING: " __VA_ARGS__); \
+   fflush(mzxerr); \
  } while(0)
 
 #ifdef DEBUG
 #define debug(...) \
  do { \
-   fprintf(stderr, "DEBUG: " __VA_ARGS__); \
-   fflush(stderr); \
+   fprintf(mzxerr, "DEBUG: " __VA_ARGS__); \
+   fflush(mzxerr); \
  } while(0)
 #else
 #define debug(...) do { } while(0)
 #endif
+#if defined(DEBUG) && defined(DEBUG_TRACE)
+#define trace(...) \
+ do { \
+    fprintf(mzxerr, "TRACE: " __VA_ARGS__); \
+    fflush(mzxerr); \
+ } while(0)
+#else
+#define trace(...) do { } while(0)
+#endif
 
-#endif /* ANDROID, CONFIG_NDS */
+#endif /* ANDROID */
 
 __M_END_DECLS
 

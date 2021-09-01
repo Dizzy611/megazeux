@@ -22,103 +22,173 @@
 
 #include "audio.h"
 #include "audio_mikmod.h"
+#include "audio_struct.h"
 #include "ext.h"
 #include "sampled_stream.h"
 
 #include "../const.h"
 #include "../util.h"
+#include "../io/vio.h"
 
-// TODO: deSDL MikMod plugin
-#include "SDL.h"
+#ifdef _WIN32
+#define MIKMOD_STATIC
+#endif
+
 #include <mikmod.h>
 
 struct mikmod_stream
 {
   struct sampled_stream s;
   MODULE *module_data;
-  Uint32 effective_frequency;
+  uint32_t effective_frequency;
+  uint32_t num_orders;
+  uint32_t *order_to_pos_table;
 };
 
 struct LMM_MREADER
 {
   MREADER mr;
-  int offset;
+  vfile *vf;
   int eof;
-  SDL_RWops *rw;
 };
 
 static BOOL LMM_Seek(struct MREADER *mr, long to, int dir)
 {
   struct LMM_MREADER *lmmmr = (struct LMM_MREADER *)mr;
-  if(dir == SEEK_SET)
-    to += lmmmr->offset;
-  return SDL_RWseek(lmmmr->rw, to, dir) < lmmmr->offset;
+  return vfseek(lmmmr->vf, to, dir);
 }
 
 static long LMM_Tell(struct MREADER *mr)
 {
   struct LMM_MREADER *lmmmr = (struct LMM_MREADER *)mr;
-  return SDL_RWtell(lmmmr->rw) - lmmmr->offset;
+  return vftell(lmmmr->vf);
 }
 
 static BOOL LMM_Read(struct MREADER *mr, void *buf, size_t sz)
 {
   struct LMM_MREADER *lmmmr = (struct LMM_MREADER *)mr;
-  return SDL_RWread(lmmmr->rw, buf, sz, 1);
+  return vfread(buf, sz, 1, lmmmr->vf);
 }
 
 static int LMM_Get(struct MREADER *mr)
 {
-  unsigned char c;
-  int i = EOF;
   struct LMM_MREADER *lmmmr = (struct LMM_MREADER *)mr;
-  if(SDL_RWread(lmmmr->rw,&c,1,1))
-    i = c;
-  return i;
+  return vfgetc(lmmmr->vf);
 }
 
 static BOOL LMM_Eof(struct MREADER *mr)
 {
   struct LMM_MREADER *lmmmr = (struct LMM_MREADER*)mr;
-  return LMM_Tell(mr) >= lmmmr->eof;
+  return vftell(lmmmr->vf) >= lmmmr->eof;
 }
 
-static MODULE *MikMod_LoadSongRW(SDL_RWops *rw, int maxchan)
+static MODULE *mm_load_vfile(vfile *vf, int maxchan)
 {
-  struct LMM_MREADER lmmmr={
-    { LMM_Seek, LMM_Tell, LMM_Read, LMM_Get, LMM_Eof },
-    0, 0, rw
-  };
+  struct LMM_MREADER lmmmr;
 
-  lmmmr.offset = SDL_RWtell(rw);
-  SDL_RWseek(rw, 0, SEEK_END);
-  lmmmr.eof = SDL_RWtell(rw);
-  SDL_RWseek(rw, lmmmr.offset, SEEK_SET);
+  memset(&lmmmr, 0, sizeof(struct LMM_MREADER));
+  lmmmr.mr.Seek = LMM_Seek;
+  lmmmr.mr.Tell = LMM_Tell;
+  lmmmr.mr.Read = LMM_Read;
+  lmmmr.mr.Get = LMM_Get;
+  lmmmr.mr.Eof = LMM_Eof;
+
+  lmmmr.vf = vf;
+  lmmmr.eof = vfilelength(vf, false);
 
   return Player_LoadGeneric((MREADER *)&lmmmr, maxchan, 0);
 }
 
-static Uint32 mm_mix_data(struct audio_stream *a_src, Sint32 *buffer,
- Uint32 len)
+/**
+ * Handle the resample mode for MikMod.
+ * This is a global rather than a per-module setting.
+ */
+static void mm_set_resample_mode(void)
 {
-  struct mikmod_stream *mm_stream = (struct mikmod_stream *)a_src;
-  Uint32 read_wanted = mm_stream->s.allocated_data_length -
-   mm_stream->s.stream_offset;
-  Uint8 *read_buffer = (Uint8 *)mm_stream->s.output_data +
-   mm_stream->s.stream_offset;
+  struct config_info *conf = get_config();
+  switch(conf->module_resample_mode)
+  {
+    case RESAMPLE_MODE_NONE:
+      md_mode = md_mode & ~(DMODE_INTERP);
+      break;
 
-  VC_WriteBytes((SBYTE*)read_buffer, read_wanted);
-  sampled_mix_data((struct sampled_stream *)mm_stream, buffer, len);
-  return 0;
+    case RESAMPLE_MODE_LINEAR:
+    case RESAMPLE_MODE_CUBIC:
+    case RESAMPLE_MODE_FIR:
+    default:
+      md_mode |= DMODE_INTERP;
+      break;
+  }
 }
 
-static void mm_set_volume(struct audio_stream *a_src, Uint32 volume)
+/**
+ * Use MikMod internal data to provide support for length and position.
+ * TODO: Dunno how stable this is :-(
+ */
+static void mm_init_order_table(struct mikmod_stream *mm_stream, MODULE *mm_data)
+{
+  uint32_t current = 0;
+  uint32_t i;
+  uint32_t *tbl;
+  uint32_t num_orders;
+
+  num_orders = mm_data->numpos;
+  tbl = cmalloc((num_orders + 1) * sizeof(uint32_t));
+
+  for(i = 0; i < num_orders; i++)
+  {
+    uint32_t pattern = mm_data->positions[i];
+
+    tbl[i] = current;
+
+    if(pattern < mm_data->numpat)
+      current += mm_data->pattrows[pattern];
+  }
+  tbl[num_orders] = current;
+
+  mm_stream->num_orders = num_orders;
+  mm_stream->order_to_pos_table = tbl;
+}
+
+static boolean mm_position_to_order_row(struct mikmod_stream *mm_stream,
+ uint32_t position, uint32_t *order, uint32_t *row)
+{
+  uint32_t *tbl = mm_stream->order_to_pos_table;
+  uint32_t i;
+
+  for(i = 0; i < mm_stream->num_orders; i++)
+  {
+    if(tbl[i] <= position && tbl[i + 1] > position)
+    {
+      *order = i;
+      *row = position - tbl[i];
+      return true;
+    }
+  }
+  return false;
+}
+
+static boolean mm_mix_data(struct audio_stream *a_src, int32_t * RESTRICT buffer,
+ size_t frames, unsigned int channels)
+{
+  struct mikmod_stream *mm_stream = (struct mikmod_stream *)a_src;
+  uint32_t read_wanted = mm_stream->s.allocated_data_length -
+   mm_stream->s.stream_offset;
+  uint8_t *read_buffer = (uint8_t *)mm_stream->s.output_data +
+   mm_stream->s.stream_offset;
+
+  VC_WriteBytes((SBYTE *)read_buffer, read_wanted);
+  sampled_mix_data((struct sampled_stream *)mm_stream, buffer, frames, channels);
+  return false;
+}
+
+static void mm_set_volume(struct audio_stream *a_src, unsigned int volume)
 {
   a_src->volume = volume;
   Player_SetVolume((SWORD)(volume/2));
 }
 
-static void mm_set_repeat(struct audio_stream *a_src, Uint32 repeat)
+static void mm_set_repeat(struct audio_stream *a_src, boolean repeat)
 {
   MODULE *mm_file = ((struct mikmod_stream *)a_src)->module_data;
 
@@ -130,18 +200,34 @@ static void mm_set_repeat(struct audio_stream *a_src, Uint32 repeat)
     mm_file->wrap = 0;
 }
 
-static void mm_set_order(struct audio_stream *a_src, Uint32 order)
+static void mm_set_order(struct audio_stream *a_src, uint32_t order)
 {
   Player_SetPosition(order);
 }
 
-// FIXME: position is unsupported by mikmod
-static void mm_set_position(struct audio_stream *a_src, Uint32 position)
+static void mm_set_position(struct audio_stream *a_src, uint32_t position)
 {
-  mm_set_order(a_src, position);
+  struct mikmod_stream *mm_stream = (struct mikmod_stream *)a_src;
+  uint32_t order, row;
+
+  if(mm_position_to_order_row(mm_stream, position, &order, &row))
+  {
+    Player_SetPosition(order);
+
+    /**
+     * TODO: DIRTY HACK!
+     *
+     * Setting the row directly doesn't affect anything because SetPosition
+     * sets data->posjmp, which will make MikMod reset the row during the next
+     * tick to data->patbrk % data->numrow. So instead of setting the row
+     * directly, set patbrk after using Player_SetPosition to force MikMod to
+     * jump to this row when it processes the next tick.
+     */
+    mm_stream->module_data->patbrk = row;
+  }
 }
 
-static void mm_set_frequency(struct sampled_stream *s_src, Uint32 frequency)
+static void mm_set_frequency(struct sampled_stream *s_src, uint32_t frequency)
 {
   if(frequency == 0)
   {
@@ -151,7 +237,7 @@ static void mm_set_frequency(struct sampled_stream *s_src, Uint32 frequency)
   else
   {
     ((struct mikmod_stream *)s_src)->effective_frequency = frequency;
-    frequency = (Uint32)((float)frequency *
+    frequency = (uint32_t)((float)frequency *
      audio.output_frequency / 44100);
   }
 
@@ -160,55 +246,60 @@ static void mm_set_frequency(struct sampled_stream *s_src, Uint32 frequency)
   sampled_set_buffer(s_src);
 }
 
-static Uint32 mm_get_order(struct audio_stream *a_src)
+static uint32_t mm_get_order(struct audio_stream *a_src)
 {
-  return ((struct mikmod_stream *)a_src)->module_data->sngpos;
+  struct mikmod_stream *mm_stream = (struct mikmod_stream *)a_src;
+  return mm_stream->module_data->sngpos;
 }
 
-// FIXME: position is unsupported by mikmod
-static Uint32 mm_get_position(struct audio_stream *a_src)
+static uint32_t mm_get_position(struct audio_stream *a_src)
 {
-  return mm_get_order(a_src);
+  struct mikmod_stream *mm_stream = (struct mikmod_stream *)a_src;
+  MODULE *mm_data = mm_stream->module_data;
+  uint32_t order = CLAMP(mm_data->sngpos, 0, (int)mm_stream->num_orders);
+
+  return mm_stream->order_to_pos_table[order] + mm_data->patpos;
 }
 
-// FIXME: position is unsupported by mikmod; furthermore, there
-// doesn't appear to be a good way of getting order count?
-static Uint32 mm_get_length(struct audio_stream *a_src)
+static uint32_t mm_get_length(struct audio_stream *a_src)
 {
-  return 0;
+  struct mikmod_stream *mm_stream = (struct mikmod_stream *)a_src;
+  return mm_stream->order_to_pos_table[mm_stream->num_orders];
 }
 
-static Uint32 mm_get_frequency(struct sampled_stream *s_src)
+static uint32_t mm_get_frequency(struct sampled_stream *s_src)
 {
   return ((struct mikmod_stream *)s_src)->effective_frequency;
 }
 
 static void mm_destruct(struct audio_stream *a_src)
 {
+  struct mikmod_stream *mm_stream = (struct mikmod_stream *)a_src;
   Player_Stop();
-  Player_Free(((struct mikmod_stream *)a_src)->module_data);
+  Player_Free(mm_stream->module_data);
+  free(mm_stream->order_to_pos_table);
   sampled_destruct(a_src);
 }
 
 static struct audio_stream *construct_mikmod_stream(char *filename,
- Uint32 frequency, Uint32 volume, Uint32 repeat)
+ uint32_t frequency, unsigned int volume, boolean repeat)
 {
-  FILE *input_file;
-  char *input_buffer;
-  Uint32 file_size;
-  struct audio_stream *ret_val = NULL;
+  vfile *input_file;
 
-  input_file = fopen_unsafe(filename, "rb");
+  /**
+   * FIXME since MikMod uses a global player state, attempting to play
+   * multiple modules at the same time predictably causes crashes. Use
+   * this hack to ignore any modules played as samples for now. :(
+   */
+  if(!repeat)
+    return NULL;
+
+  input_file = vfopen_unsafe(filename, "rb");
 
   if(input_file)
   {
-    MODULE *open_file;
-
-    file_size = ftell_and_rewind(input_file);
-
-    input_buffer = cmalloc(file_size);
-    fread(input_buffer, file_size, 1, input_file);
-    open_file = MikMod_LoadSongRW(SDL_RWFromMem(input_buffer, file_size), 64);
+    MODULE *open_file = mm_load_vfile(input_file, 64);
+    vfclose(input_file);
 
     if(open_file)
     {
@@ -217,6 +308,9 @@ static struct audio_stream *construct_mikmod_stream(char *filename,
       struct audio_stream_spec a_spec;
       mm_stream->module_data = open_file;
       Player_Start(mm_stream->module_data);
+
+      mm_init_order_table(mm_stream, open_file);
+      mm_set_resample_mode();
 
       memset(&a_spec, 0, sizeof(struct audio_stream_spec));
       a_spec.mix_data     = mm_mix_data;
@@ -234,19 +328,18 @@ static struct audio_stream *construct_mikmod_stream(char *filename,
       s_spec.get_frequency = mm_get_frequency;
 
       initialize_sampled_stream((struct sampled_stream *)mm_stream, &s_spec,
-       frequency, 2, 0);
+       frequency, 2, false);
 
       initialize_audio_stream((struct audio_stream *)mm_stream, &a_spec,
        volume, repeat);
 
-      ret_val = (struct audio_stream *)mm_stream;
+      return (struct audio_stream *)mm_stream;
     }
-
-    fclose(input_file);
-    free(input_buffer);
+    else
+      debug("MikMod failed to open '%s': %s\n", filename,
+       MikMod_strerror(MikMod_errno));
   }
-
-  return ret_val;
+  return NULL;
 }
 
 void init_mikmod(struct config_info *conf)
@@ -264,29 +357,34 @@ void init_mikmod(struct config_info *conf)
 
   MikMod_RegisterDriver(&drv_nos);
 
-  /* XM and AMF seem to be broken with Mikmod? */
-
+  /**
+   * These are arranged in the same order as MikMod_RegisterAllLoaders
+   * registers them--alphabetical, with the exception of SoundTracker 15-sample
+   * .MODs last (presumably since they do not have a magic string).
+   */
+  MikMod_RegisterLoader(&load_669);
+  MikMod_RegisterLoader(&load_amf); // DSMI .AMF
+  MikMod_RegisterLoader(&load_asy); // ASYLUM .AMF
+  MikMod_RegisterLoader(&load_dsm);
+  MikMod_RegisterLoader(&load_far);
   MikMod_RegisterLoader(&load_gdm);
-  //MikMod_RegisterLoader(&load_xm);
-  MikMod_RegisterLoader(&load_s3m);
+  MikMod_RegisterLoader(&load_it);
   MikMod_RegisterLoader(&load_mod);
   MikMod_RegisterLoader(&load_med);
   MikMod_RegisterLoader(&load_mtm);
-  MikMod_RegisterLoader(&load_stm);
-  MikMod_RegisterLoader(&load_it);
-  MikMod_RegisterLoader(&load_669);
-  MikMod_RegisterLoader(&load_ult);
-  MikMod_RegisterLoader(&load_dsm);
-  MikMod_RegisterLoader(&load_far);
   MikMod_RegisterLoader(&load_okt);
-  //MikMod_RegisterLoader(&load_amf);
+  MikMod_RegisterLoader(&load_stm);
+  MikMod_RegisterLoader(&load_s3m);
+  MikMod_RegisterLoader(&load_ult);
+  MikMod_RegisterLoader(&load_xm);
+  MikMod_RegisterLoader(&load_m15); // Soundtracker .MOD
 
   // FIXME: Should break a lot more here
   if(MikMod_Init(NULL))
-    fprintf(stderr, "MikMod Init failed: %s", MikMod_strerror(MikMod_errno));
+    warn("MikMod Init failed: %s\n", MikMod_strerror(MikMod_errno));
 
   audio_ext_register("669", construct_mikmod_stream);
-  //audio_ext_register("amf", construct_mikmod_stream);
+  audio_ext_register("amf", construct_mikmod_stream);
   audio_ext_register("dsm", construct_mikmod_stream);
   audio_ext_register("far", construct_mikmod_stream);
   audio_ext_register("gdm", construct_mikmod_stream);
@@ -294,9 +392,12 @@ void init_mikmod(struct config_info *conf)
   audio_ext_register("med", construct_mikmod_stream);
   audio_ext_register("mod", construct_mikmod_stream);
   audio_ext_register("mtm", construct_mikmod_stream);
+  audio_ext_register("nst", construct_mikmod_stream);
+  audio_ext_register("oct", construct_mikmod_stream);
   audio_ext_register("okt", construct_mikmod_stream);
   audio_ext_register("s3m", construct_mikmod_stream);
   audio_ext_register("stm", construct_mikmod_stream);
   audio_ext_register("ult", construct_mikmod_stream);
-  //audio_ext_register("xm", construct_mikmod_stream);
+  audio_ext_register("wow", construct_mikmod_stream);
+  audio_ext_register("xm", construct_mikmod_stream);
 }

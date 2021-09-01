@@ -1,5 +1,5 @@
 /* Extended Module Player
- * Copyright (C) 1996-2016 Claudio Matsuoka and Hipolito Carraro Jr
+ * Copyright (C) 1996-2021 Claudio Matsuoka and Hipolito Carraro Jr
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -125,7 +125,9 @@ int med2_load(struct module_data *m, HIO_HANDLE *f, const int start)
 		return -1;
 	}
 
-	mod->spd = 192 / k;
+	mod->spd = 6;
+	mod->bpm = k;
+	m->time_factor = MED_TIME_FACTOR;
 
 	hio_read16b(f);			/* flags */
 	sliding = hio_read16b(f);	/* sliding */
@@ -174,7 +176,7 @@ int med2_load(struct module_data *m, HIO_HANDLE *f, const int start)
 					event->fxt = FX_VOLSLIDE;
 					break;
 				case 0x0f:
-					event->fxt = 192 / event->fxt;
+					event->fxt = FX_S3M_BPM;
 					break;
 				}
 			}
@@ -194,11 +196,11 @@ int med2_load(struct module_data *m, HIO_HANDLE *f, const int start)
 
 		libxmp_get_instrument_path(m, ins_path, 256);
 		found = libxmp_check_filename_case(ins_path,
-				(char *)mod->xxi[i].name, name, 256);
+					mod->xxi[i].name, name, 256);
 
 		if (found) {
 			snprintf(path, PATH_MAX, "%s/%s", ins_path, name);
-			if ((s = hio_open(path, "rb"))) {
+			if ((s = hio_open(path,"rb")) != NULL) {
 				mod->xxs[i].len = hio_size(s);
 			}
 		}
@@ -207,7 +209,7 @@ int med2_load(struct module_data *m, HIO_HANDLE *f, const int start)
 			mod->xxi[i].nsm = 1;
 		}
 
-		if (!strlen((char *)mod->xxi[i].name) && !mod->xxs[i].len) {
+		if (!strlen(mod->xxi[i].name) && !mod->xxs[i].len) {
 			if (s != NULL) {
 				hio_close(s);
 			}

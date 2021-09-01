@@ -25,6 +25,7 @@
 #include "debug.h"
 #include "robot.h"
 #include "robo_debug.h"
+#include "stringsearch.h"
 #include "window.h"
 
 #include "../core.h"
@@ -37,11 +38,13 @@
 #include "../window.h"
 #include "../world_struct.h"
 
+#define MATCH_STRING_MAX 61
+
 struct breakpoint
 {
   char match_name[ROBOT_NAME_SIZE];
-  char match_string[61];
-  int index[256];
+  char match_string[MATCH_STRING_MAX];
+  struct string_search_data index;
   int line_number;
   int match_name_len;
   int match_string_len;
@@ -49,7 +52,7 @@ struct breakpoint
 
 struct watchpoint
 {
-  char match_name[61];
+  char match_name[MATCH_STRING_MAX];
   int last_value;
 };
 
@@ -111,8 +114,10 @@ static inline int get_watchpoint_value(struct world *mzx_world,
   if(is_string(wt->match_name))
   {
     struct string src_string;
+    char tmp[MATCH_STRING_MAX];
+    memcpy(tmp, wt->match_name, MATCH_STRING_MAX);
 
-    if(get_string(mzx_world, wt->match_name, &src_string, 0))
+    if(get_string(mzx_world, tmp, &src_string, 0))
     {
       return hash_string(src_string.value, src_string.length);
     }
@@ -146,7 +151,7 @@ void update_watchpoint_last_values(struct world *mzx_world)
 static int edit_breakpoint_dialog(struct world *mzx_world,
  struct breakpoint *br, const char *title)
 {
-  char match_string[61];
+  char match_string[MATCH_STRING_MAX];
   char match_name[ROBOT_NAME_SIZE];
   int line_number;
 
@@ -157,7 +162,7 @@ static int edit_breakpoint_dialog(struct world *mzx_world,
   // Prevent previous keys from carrying through.
   force_release_all_keys();
 
-  memcpy(match_string, br->match_string, 61);
+  memcpy(match_string, br->match_string, MATCH_STRING_MAX);
   memcpy(match_name, br->match_name, ROBOT_NAME_SIZE);
   line_number = br->line_number;
 
@@ -180,7 +185,7 @@ static int edit_breakpoint_dialog(struct world *mzx_world,
 
   if(!result)
   {
-    memcpy(br->match_string, match_string, 61);
+    memcpy(br->match_string, match_string, MATCH_STRING_MAX);
     memcpy(br->match_name, match_name, ROBOT_NAME_SIZE);
     br->line_number = line_number;
     br->match_string_len = strlen(match_string);
@@ -196,7 +201,7 @@ static int edit_breakpoint_dialog(struct world *mzx_world,
 static int edit_watchpoint_dialog(struct world *mzx_world,
  struct watchpoint *wt, const char *title)
 {
-  char match_name[61];
+  char match_name[MATCH_STRING_MAX];
 
   struct element *elements[3];
   struct dialog di;
@@ -205,7 +210,7 @@ static int edit_watchpoint_dialog(struct world *mzx_world,
   // Prevent previous keys from carrying through.
   force_release_all_keys();
 
-  memcpy(match_name, wt->match_name, 61);
+  memcpy(match_name, wt->match_name, MATCH_STRING_MAX);
 
   elements[0] = construct_input_box(3, 1,
    "Variable:", 60, match_name);
@@ -220,7 +225,7 @@ static int edit_watchpoint_dialog(struct world *mzx_world,
 
   if(!result)
   {
-    memcpy(wt->match_name, match_name, 61);
+    memcpy(wt->match_name, match_name, MATCH_STRING_MAX);
   }
 
   // Prevent UI keys from carrying through.
@@ -242,8 +247,8 @@ static void new_breakpoint(struct world *mzx_world)
        num_breakpoints_allocated * sizeof(struct breakpoint *));
     }
 
-    boyer_moore_index(br->match_string, br->match_string_len,
-     br->index, true);
+    string_search_index(br->match_string, br->match_string_len,
+     &(br->index), true);
 
     breakpoints[num_breakpoints] = br;
     num_breakpoints++;
@@ -457,8 +462,8 @@ void __debug_robot_config(struct world *mzx_world)
 
             if(!edit_breakpoint_dialog(mzx_world, br, "Edit Breakpoint"))
             {
-              boyer_moore_index(br->match_string, br->match_string_len,
-               br->index, true);
+              string_search_index(br->match_string, br->match_string_len,
+               &(br->index), true);
             }
           }
           else
@@ -875,7 +880,7 @@ static int debug_robot(context *ctx, struct robot *cur_robot, int id,
 
   if(info && info[0])
   {
-    strncpy(buffer_pos, info, 76);
+    snprintf(buffer_pos, 77, "%s", info);
     buffer_pos[76] = 0;
 
     len = strlen(buffer_pos);
@@ -1091,7 +1096,7 @@ static inline void get_src_line(struct robot *cur_robot, char **_src_ptr,
  int *_src_length, int *_real_line_num)
 {
   struct command_mapping *cmd_map = cur_robot->command_map;
-  int line_num = get_program_command_num(cur_robot);
+  int line_num = get_program_command_num(cur_robot, cur_robot->cur_prog_line);
 
   char *src_ptr;
   int src_length;
@@ -1112,7 +1117,7 @@ static inline void get_src_line(struct robot *cur_robot, char **_src_ptr,
     }
 
     // Remove any trailing newlines that might have made it in
-    while(src_length > 0 && isspace(src_ptr[src_length - 1]))
+    while(src_length > 0 && isspace((unsigned char)src_ptr[src_length - 1]))
       src_length--;
 
     *_src_ptr = src_ptr;
@@ -1205,8 +1210,8 @@ int __debug_robot_break(context *ctx, struct robot *cur_robot,
 
         // Try to find the match pattern in the line
         if(b->match_string_len)
-          if(!boyer_moore_search((void *)src_ptr, src_length,
-           (void *)b->match_string, b->match_string_len, b->index, true))
+          if(!string_search((void *)src_ptr, src_length,
+           (void *)b->match_string, b->match_string_len, &(b->index), true))
             continue;
 
         action = ACTION_MATCHED;

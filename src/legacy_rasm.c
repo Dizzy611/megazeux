@@ -26,8 +26,10 @@
 
 #include "rasm.h"
 #include "data.h"
-#include "fsafeopen.h"
 #include "util.h"
+#include "io/fsafeopen.h"
+#include "io/memfile.h"
+#include "io/vio.h"
 
 #define IMM_U16            (1 << 0)
 #define IMM_S16            (1 << 0)
@@ -1387,22 +1389,22 @@ static int rasm_parse_argument(char *cmd_line, char **next,
   return UNDEFINED;
 }
 
-static int get_word(char *str, char *source, char t)
+static int get_word(char *dest, size_t left, char *source, char t)
 {
-  int i = 0;
+  size_t i = 0;
   char current;
 
   current = *source;
 
-  while((current != t) && (current != 0) && (current != '\n') && (i < 256))
+  while((current != t) && (current != 0) && (current != '\n') && (i + 1 < left))
   {
-    source += escape_chars(str + i, source);
+    source += escape_chars(dest + i, source);
     current = *source;
 
     i++;
   }
 
-  str[i] = 0;
+  dest[i] = 0;
 
   return i;
 }
@@ -1808,14 +1810,14 @@ int legacy_assemble_line(char *cpos, char *output_buffer, char *error_buffer,
   int error;
   char command_name[256];
   int command_params[32];
-  char temp[256];
+  char temp[ROBOT_MAX_TR];
   char *first_non_space = NULL;
   void *param_list[32];
   int advance;
   int dir_modifier_buffer = 0;
   int words = 0;
-  int bytes_assembled;
-  int i;
+  char *temp_pos = temp;
+  size_t temp_left = sizeof(temp);
 
   struct mzx_command_rw current_command;
 
@@ -1850,10 +1852,15 @@ int legacy_assemble_line(char *cpos, char *output_buffer, char *error_buffer,
     current_command.parameters = 1;
 
     str_size = strlen(first_non_space) + 1;
-    param_list[0] = cmalloc(str_size);
-    memcpy((char *)param_list[0], first_non_space, str_size);
+    if(temp_left < str_size)
+      goto err_buffer;
+
+    memcpy(temp_pos, first_non_space, str_size);
     current_command.param_types[0] = STRING;
 
+    param_list[0] = temp_pos;
+    temp_pos += str_size;
+    temp_left -= str_size;
     arg_count = 1;
 
     if(param_listing)
@@ -1869,7 +1876,7 @@ int legacy_assemble_line(char *cpos, char *output_buffer, char *error_buffer,
     current_line_position = cpos;
 
     current_line_position +=
-     get_word(command_name, current_line_position, ' ');
+     get_word(command_name, 256, current_line_position, ' ');
     words++;
     last_arg_type = 0;
 
@@ -1900,11 +1907,15 @@ int legacy_assemble_line(char *cpos, char *output_buffer, char *error_buffer,
         if(current_arg_type == UNDEFINED)
         {
           // Grab the string off the command list.
-          int str_size =
-           get_word(temp, current_line_position, ' ');
+          size_t str_size =
+           get_word(temp_pos, temp_left, current_line_position, ' ');
 
-          param_list[arg_count] = cmalloc(str_size + 1);
-          memcpy((char *)param_list[arg_count], temp, str_size + 1);
+          if(temp_left < str_size + 1)
+            goto err_buffer;
+
+          param_list[arg_count] = temp_pos;
+          temp_pos += str_size + 1;
+          temp_left -= str_size + 1;
           advance = 1;
           dir_modifier_buffer = 0;
         }
@@ -1913,11 +1924,15 @@ int legacy_assemble_line(char *cpos, char *output_buffer, char *error_buffer,
         if(current_arg_type == STRING)
         {
           // Grab the string off the command list.
-          int str_size =
-           get_word(temp, current_line_position + 1, '"');
+          size_t str_size =
+           get_word(temp_pos, temp_left, current_line_position + 1, '"');
 
-          param_list[arg_count] = cmalloc(str_size + 1);
-          memcpy((char *)param_list[arg_count], temp, str_size + 1);
+          if(temp_left < str_size + 1)
+            goto err_buffer;
+
+          param_list[arg_count] = temp_pos;
+          temp_pos += str_size + 1;
+          temp_left -= str_size + 1;
           advance = 1;
           dir_modifier_buffer = 0;
         }
@@ -1943,22 +1958,32 @@ int legacy_assemble_line(char *cpos, char *output_buffer, char *error_buffer,
           }
           else
           {
-            // Store the translation into the command list.
-            param_list[arg_count] = cmalloc(2);
-            ((char *)param_list[arg_count])[0] =
-             current_arg_translation | dir_modifier_buffer;
-            ((char *)param_list[arg_count])[1] = 0;
+            if(temp_left < 2)
+              goto err_buffer;
 
+            // Store the translation into the command list.
+            temp_pos[0] = current_arg_translation | dir_modifier_buffer;
+            temp_pos[1] = 0;
+
+            param_list[arg_count] = temp_pos;
+            temp_pos += 2;
+            temp_left -= 2;
             advance = 1;
             dir_modifier_buffer = 0;
           }
         }
         else
         {
+          if(temp_left < 2)
+            goto err_buffer;
+
           // Store the translation into the command list.
-          param_list[arg_count] = cmalloc(2);
-          ((char *)param_list[arg_count])[0] = current_arg_translation;
-          ((char *)param_list[arg_count])[1] = current_arg_translation >> 8;
+          temp_pos[0] = current_arg_translation;
+          temp_pos[1] = current_arg_translation >> 8;
+
+          param_list[arg_count] = temp_pos;
+          temp_pos += 2;
+          temp_left -= 2;
           advance = 1;
           dir_modifier_buffer = 0;
         }
@@ -1994,22 +2019,19 @@ int legacy_assemble_line(char *cpos, char *output_buffer, char *error_buffer,
   if(param_listing)
     *arg_count_ext = words;
 
-  bytes_assembled = assemble_command(translated_command,
+  return assemble_command(translated_command,
    &current_command, param_list, output_buffer, &next);
 
-  for(i = 0; i < arg_count; i++)
-  {
-    free(param_list[i]);
-  }
-
-  return bytes_assembled;
+err_buffer:
+  sprintf(error_buffer, "Token %d exceeded command buffer.", arg_count);
+  return -1;
 }
 
 #ifndef CONFIG_DEBYTECODE
 
 char *assemble_file(char *name, int *size)
 {
-  FILE *input_file = fsafeopen(name, "rb");
+  vfile *input_file = fsafeopen(name, "rb");
   char line_buffer[256];
   char bytecode_buffer[256];
   char error_buffer[256];
@@ -2026,7 +2048,7 @@ char *assemble_file(char *name, int *size)
   buffer[0] = 0xFF;
 
   // fsafegets ensures no line terminators are present
-  while(fsafegets(line_buffer, 255, input_file))
+  while(vfsafegets(line_buffer, 255, input_file))
   {
     line_bytecode_length =
      legacy_assemble_line(line_buffer, bytecode_buffer, error_buffer, NULL, NULL);
@@ -2057,7 +2079,7 @@ char *assemble_file(char *name, int *size)
   *size = current_size + 1;
 
 exit_out:
-  fclose(input_file);
+  vfclose(input_file);
   return buffer;
 }
 
@@ -2069,9 +2091,7 @@ char *assemble_program(char *src, int len, int *size)
   int line_bytecode_length;
   int allocated_size = 1024;
   char *buffer;
-
-  char *input_pos = src;
-  char *input_end = src + len;
+  struct memfile mf;
 
   int output_position = 1;
   int current_size = 1;
@@ -2079,8 +2099,10 @@ char *assemble_program(char *src, int len, int *size)
   buffer = cmalloc(1024);
   buffer[0] = 0xFF;
 
+  mfopen(src, len, &mf);
+
   // It's wasteful to copy each line, but the alternative is worse...
-  while(memsafegets(line_buffer, 255, &input_pos, input_end))
+  while(mfsafegets(line_buffer, 256, &mf))
   {
     line_bytecode_length =
      legacy_assemble_line(line_buffer, bytecode_buffer, error_buffer, NULL, NULL);
@@ -2571,7 +2593,7 @@ __editor_maybe_static int disassemble_line(char *cpos, char **next,
 void disassemble_file(char *name, char *program, int program_length,
  int allow_ignores, int base)
 {
-  FILE *output_file = fsafeopen(name, "wb");
+  vfile *output_file = fsafeopen(name, "wb");
   char command_buffer[256];
   char error_buffer[256];
   char *current_robot_pos = program + 1;
@@ -2590,14 +2612,14 @@ void disassemble_file(char *name, char *program, int program_length,
 
     if(new_line)
     {
-      fwrite(command_buffer, line_text_length, 1, output_file);
-      fputc('\n', output_file);
+      vfwrite(command_buffer, line_text_length, 1, output_file);
+      vfputc('\n', output_file);
     }
 
     current_robot_pos = next;
   } while(new_line);
 
-  fclose(output_file);
+  vfclose(output_file);
 }
 
 static inline int get_program_line_count(char *program, int program_length)
@@ -2783,7 +2805,7 @@ static void validate_legacy_bytecode_print(char *bc, int program_length,
 
   if(offset > program_length)
   {
-    fprintf(stderr, "\n");
+    fprintf(mzxerr, "\n");
     debug("Offset exceeded program length\n");
     debug("Prog len: %d    Offset: %d\n", program_length, offset);
     return;

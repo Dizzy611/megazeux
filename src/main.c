@@ -47,13 +47,15 @@
 #include "world.h"
 #include "counter.h"
 #include "run_stubs.h"
+#include "io/path.h"
+#include "io/vio.h"
 
 #include "audio/audio.h"
 #include "audio/sfx.h"
 #include "network/network.h"
 
 #ifdef CONFIG_SDL
-#include <SDL.h>
+#include <SDL.h> /* SDL_main */
 #endif
 
 #ifndef VERSION
@@ -98,7 +100,8 @@ static void init_pledge(void)
 }
 #endif
 
-#ifdef CONFIG_UPDATER
+#if defined(CONFIG_UPDATER) && defined(__WIN32__)
+#define CAN_RESTART
 static char **rewrite_argv_for_execv(int argc, char **argv)
 {
   char **new_argv = cmalloc((argc+1) * sizeof(char *));
@@ -141,7 +144,7 @@ static char **rewrite_argv_for_execv(int argc, char **argv)
 
   return new_argv;
 }
-#endif
+#endif /* CONFIG_UPDATER && __WIN32__ */
 
 #ifdef __amigaos__
 #define __libspec LIBSPEC
@@ -156,6 +159,9 @@ __libspec int main(int argc, char *argv[])
 
   core_context *core_data;
   struct config_info *conf;
+#ifdef CAN_RESTART
+  boolean need_restart = false;
+#endif
 
   // Keep this 7.2k structure off the stack..
   static struct world mzx_world;
@@ -163,17 +169,19 @@ __libspec int main(int argc, char *argv[])
   if(!platform_init())
     goto err_out;
 
+  check_alloc_init();
+
   // We need to store the current working directory so it's
   // always possible to get back to it..
-  getcwd(startup_dir, MAX_PATH);
+  vgetcwd(startup_dir, MAX_PATH);
   snprintf(current_dir, MAX_PATH, "%s", startup_dir);
 
 #ifdef CONFIG_STDIO_REDIRECT
   // Do this after platform_init() since, even though platform_init() might
   // log stuff, it actually initializes the filesystem on some platforms.
-  if(!redirect_stdio(startup_dir, true))
-    if(!redirect_stdio(SHAREDIR, false))
-      redirect_stdio(getenv("HOME"), false);
+  if(!redirect_stdio_init(startup_dir, true))
+    if(!redirect_stdio_init(SHAREDIR, false))
+      redirect_stdio_init(getenv("HOME"), false);
 #endif
 
 #ifdef __APPLE__
@@ -188,11 +196,19 @@ __libspec int main(int argc, char *argv[])
 #ifdef ANDROID
   // Accept argv[1] passed in from the Java side as the "intended" argv[0].
   if(argc >= 2)
+  {
     argv++;
+    argc--;
+  }
+
+  // Always try to start in /storage/emulated/0 to save some headaches.
+  path_navigate(current_dir, MAX_PATH, "/storage/emulated/0");
 #endif
 
   // argc may be 0 on e.g. some Wii homebrew loaders.
+#ifndef CONFIG_WIIU
   if(argc == 0)
+#endif
   {
     argv = _backup_argv;
     argc = 1;
@@ -206,35 +222,38 @@ __libspec int main(int argc, char *argv[])
   // Figure out where all configuration files should be loaded
   // form. For game.cnf, et al this should eventually be wrt
   // the game directory, not the config.txt's path.
-  get_path(mzx_res_get_by_id(CONFIG_TXT), config_dir, MAX_PATH);
+  path_get_directory(config_dir, MAX_PATH, mzx_res_get_by_id(CONFIG_TXT));
 
   // Move into the configuration file's directory so that any
   // "include" statements are done wrt this path. Move back
   // into the "current" directory after loading.
-  chdir(config_dir);
+  vchdir(config_dir);
 
   default_config();
-  set_config_from_file_startup(mzx_res_get_by_id(CONFIG_TXT));
+  default_editor_config();
+  set_config_from_file(SYSTEM_CNF, mzx_res_get_by_id(CONFIG_TXT));
   set_config_from_command_line(&argc, argv);
   conf = get_config();
 
-  default_editor_config();
-  set_editor_config_from_file(mzx_res_get_by_id(CONFIG_TXT));
-  set_editor_config_from_command_line(&argc, argv);
   store_editor_config_backup();
 
   init_macros();
 
   // Startup path might be relative, so change back before checking it.
-  chdir(current_dir);
+  vchdir(current_dir);
 
   // At this point argv should have all the config options
   // of the form var=value removed, leaving only unparsed
   // parameters. Interpret the first unparsed parameter
   // as a file to load (overriding startup_file etc.)
-  if(argc > 1)
-    split_path_filename(argv[1], conf->startup_path, 256,
-     conf->startup_file, 256);
+  if(argc > 1 && argv != _backup_argv)
+  {
+    path_get_directory_and_filename(
+      conf->startup_path, sizeof(conf->startup_path),
+      conf->startup_file, sizeof(conf->startup_file),
+      argv[1]
+    );
+  }
 
   if(strlen(conf->startup_path))
   {
@@ -242,15 +261,15 @@ __libspec int main(int argc, char *argv[])
     snprintf(current_dir, MAX_PATH, "%s", conf->startup_path);
   }
 
-  chdir(current_dir);
+  vchdir(current_dir);
 
   counter_fsg();
 
   rng_seed_init();
 
-  set_mouse_mul(8, 14);
+  mouse_size(8, 14);
 
-  init_event();
+  init_event(conf);
 
   if(!init_video(conf, CAPTION))
     goto err_free_config;
@@ -267,7 +286,7 @@ __libspec int main(int argc, char *argv[])
 #ifdef CONFIG_UPDATER
     if(is_updater())
     {
-      if(updater_init(argc, argv))
+      if(updater_init())
       {
         // No auto update checks on repo builds.
         if(!strcmp(VERSION, "GIT") &&
@@ -317,19 +336,23 @@ __libspec int main(int argc, char *argv[])
 #ifdef CONFIG_UPDATER
 update_restart_mzx:
 #endif
+#ifdef CAN_RESTART
+  need_restart = core_restart_requested(core_data);
+#endif
+  core_free(core_data);
   network_layer_exit(conf);
   quit_audio();
 
-#ifdef CONFIG_UPDATER
+#ifdef CAN_RESTART
   // TODO: eventually any platform with execv will need to be able to allow
   // this for config/standalone-invoked restarts. Locking it to the updater
   // for now because that's the only thing that currently uses it.
-  if(core_restart_requested(core_data))
+  if(need_restart)
   {
     char **new_argv = rewrite_argv_for_execv(argc, argv);
 
     info("Attempting to restart MegaZeux...\n");
-    if(!chdir(startup_dir))
+    if(!vchdir(startup_dir))
     {
       execv(argv[0], (const void *)new_argv);
       perror("execv");
@@ -338,7 +361,6 @@ update_restart_mzx:
     error_message(E_INVOKE_SELF_FAILED, 0, NULL);
   }
 #endif
-  core_free(core_data);
 
   quit_video();
 
@@ -350,6 +372,9 @@ err_free_config:
   free_config();
   free_editor_config();
 err_free_res:
+#ifdef CONFIG_STDIO_REDIRECT
+  redirect_stdio_exit();
+#endif
   mzx_res_free();
   platform_quit();
 err_out:

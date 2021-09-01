@@ -29,6 +29,7 @@
 #include "graphics.h"
 #include "helpsys.h"
 #include "platform.h"
+#include "util.h"
 #include "window.h"
 #include "world.h"
 
@@ -50,7 +51,6 @@ int error(const char *string, enum error_type type, unsigned int options,
   const char *type_name;
   int t1 = 9, ret = 0;
   int joystick_key;
-  char temp[5];
   int x;
 
   // Find the name of this error type.
@@ -104,7 +104,7 @@ int error(const char *string, enum error_type type, unsigned int options,
   x = 40 - (int)strlen(type_name)/2;
   write_string(type_name, x, 10, 78, 0);
 
-  write_string(string, 40 - ((Uint32)strlen(string) / 2), 11, 79, 0);
+  write_string(string, 40 - ((unsigned int)strlen(string) / 2), 11, 79, 0);
 
   // Add options
   write_string("Press", 4, 13, 78, 0);
@@ -148,16 +148,15 @@ int error(const char *string, enum error_type type, unsigned int options,
 
   if(code != 0)
   {
-    write_string(" Debug code:0000h ", 30, 14, 64, 0);
-    sprintf(temp, "%x", code);
-    write_string(temp, 46 - (Uint32)strlen(temp), 14, 64, 0);
+    char temp[32];
+    snprintf(temp, 32, " Debug code:%4.4xh ", code);
+    write_string(temp, 30, 14, 64, 0);
   }
-
-  update_screen();
 
   // Get key
   do
   {
+    update_screen();
     update_event_status_delay();
     t1 = get_key(keycode_internal_wrt_numlock);
 
@@ -228,6 +227,9 @@ int error(const char *string, enum error_type type, unsigned int options,
   m_show();
   if(ret == ERROR_OPT_EXIT) // Exit the program
   {
+#ifdef CONFIG_STDIO_REDIRECT
+    redirect_stdio_exit();
+#endif
     platform_quit();
     exit(-1);
   }
@@ -432,6 +434,12 @@ int error_message(enum error_code id, int parameter, const char *string)
       code = 0x2563;
       break;
 
+    case E_NO_EXTENDED_CHARSETS:
+      sprintf(error_mesg, "Limited/missing extended charset support; "
+       "some features may not work");
+      code = 0x2564;
+      break;
+
     case E_ZIP_BOARD_CORRUPT:
       sprintf(error_mesg, "Board # %d is corrupt", lo);
       code = 0x9000;
@@ -479,6 +487,31 @@ int error_message(enum error_code id, int parameter, const char *string)
       sprintf(error_mesg, "Cannot overwrite the player- move it first");
       severity = ERROR_T_WARNING;
       code = 0x0000;
+      break;
+
+    case E_ANSI_IMPORT:
+      sprintf(error_mesg, "Error importing ANSi");
+      code = 0x1901;
+      break;
+
+    case E_ANSI_EXPORT:
+      sprintf(error_mesg, "Error exporting ANSi");
+      code = 0x0F01;
+      break;
+
+    case E_TEXT_EXPORT:
+      sprintf(error_mesg, "Error exporting text");
+      code = 0x1401;
+      break;
+
+    case E_SFX_IMPORT:
+      sprintf(error_mesg, "File is invalid or is not an SFX file");
+      code = 0;
+      break;
+
+    case E_SFX_EXPORT:
+      sprintf(error_mesg, "Error exporting SFX file");
+      code = 0;
       break;
 #endif
 

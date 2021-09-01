@@ -32,10 +32,13 @@
 #include "legacy_world.h"
 #include "robot.h"
 #include "str.h"
+#include "util.h"
 #include "world.h"
 #include "world_format.h"
 #include "world_struct.h"
-#include "zip.h"
+#include "io/memfile.h"
+#include "io/vio.h"
+#include "io/zip.h"
 
 
 /* The MZM format hasn't changed a whole lot with zips; only the robots
@@ -43,39 +46,31 @@
  * be a raw data format, and furthermore accessing the raw data might be useful.
  */
 
-
 // This is assumed to not go over the edges.
 
-static void save_mzm_common(struct world *mzx_world, int start_x, int start_y,
- int width, int height, int mode, int savegame, void *(*alloc)(size_t, void **),
- void **storage)
+/**
+ * Calculate the total storage size and storage mode of an MZM.
+ */
+static size_t save_mzm_calculate_size(struct world *mzx_world, int start_x,
+ int start_y, int width, int height, int mode, int savegame,
+ enum mzm_storage_mode *storage_mode)
 {
-  int storage_mode = 0;
-  void *buffer;
-  unsigned char *bufferPtr;
-
   size_t mzm_size;
-  int num_robots_alloc = 0;
+  *storage_mode = mode ? MZM_STORAGE_MODE_LAYER : MZM_STORAGE_MODE_BOARD;
 
-  if(mode)
-    storage_mode = 1;
-
-  if(savegame)
-    savegame = 1;
-
-  // Before saving the MZM, we first calculate its file size
-  // Then we allocate the memory needed to store the MZM
+  // Header size.
   mzm_size = 20;
 
-  // Add on the storage space required to store all tiles
-  mzm_size += (width * height) * (storage_mode ? 2 : 6);
+  // Raw tile data storage space.
+  mzm_size += (width * height) * (*storage_mode ? 2 : 6);
 
-  if(mode == 0)
+  // Robot storage space (board to board storage mode only).
+  if(mode == MZM_BOARD_TO_BOARD_STORAGE)
   {
-    // Allocate memory for robots
     struct board *src_board = mzx_world->current_board;
     struct robot **robot_list = src_board->robot_list_name_sorted;
     int num_robots_active = src_board->num_robots_active;
+    int num_robots_alloc = 0;
     int i;
 
     for(i = 0; i < num_robots_active; i++)
@@ -101,30 +96,36 @@ static void save_mzm_common(struct world *mzx_world, int start_x, int start_y,
       mzm_size += zip_bound_total_header_usage(num_robots_alloc, 3);
     }
   }
+  return mzm_size;
+}
 
-  buffer = alloc(mzm_size, storage);
-  bufferPtr = buffer;
-  memcpy(bufferPtr, "MZM3", 4);
-  bufferPtr += 4;
+static size_t save_mzm_common(struct world *mzx_world,
+ int start_x, int start_y, int width, int height, int mode, int savegame,
+ const enum mzm_storage_mode storage_mode, struct memfile *mf)
+{
+  if(savegame)
+    savegame = 1;
 
-  mem_putw(width, &bufferPtr);
-  mem_putw(height, &bufferPtr);
-  // Come back here later if there's robot information
-  mem_putd(0, &bufferPtr);
-  mem_putc(0, &bufferPtr);
-  mem_putc(storage_mode, &bufferPtr);
-  mem_putc(0, &bufferPtr);
+  mfwrite("MZM3", 4, 1, mf);
 
-  mem_putw(MZX_VERSION, &bufferPtr);
+  mfputw(width, mf);
+  mfputw(height, mf);
+  // Come back here later if there's robot information.
+  mfputd(0, mf); // Robot offset.
+  mfputc(0, mf); // Robot count.
+  mfputc(storage_mode, mf);
+  mfputc(0, mf); // Savegame mode (only set non-zero if there are robots).
+
+  mfputw(MZX_VERSION, mf);
   // Reserved bytes
-  mem_putc(0, &bufferPtr);
-  mem_putc(0, &bufferPtr);
-  mem_putc(0, &bufferPtr);
+  mfputc(0, mf);
+  mfputc(0, mf);
+  mfputc(0, mf);
 
   switch(mode)
   {
     // Board, raw
-    case 0:
+    case MZM_BOARD_TO_BOARD_STORAGE:
     {
       struct zip_archive *zp;
 
@@ -157,12 +158,12 @@ static void save_mzm_common(struct world *mzx_world, int start_x, int start_y,
             robot_numbers[num_robots] = level_param[offset];
             num_robots++;
 
-            mem_putc(current_id, &bufferPtr);
-            mem_putc(0, &bufferPtr);
-            mem_putc(level_color[offset], &bufferPtr);
-            mem_putc(level_under_id[offset], &bufferPtr);
-            mem_putc(level_under_param[offset], &bufferPtr);
-            mem_putc(level_under_color[offset], &bufferPtr);
+            mfputc(current_id, mf);
+            mfputc(0, mf);
+            mfputc(level_color[offset], mf);
+            mfputc(level_under_id[offset], mf);
+            mfputc(level_under_param[offset], mf);
+            mfputc(level_under_color[offset], mf);
           }
           else
 
@@ -171,21 +172,21 @@ static void save_mzm_common(struct world *mzx_world, int start_x, int start_y,
           {
             // Sensor, scroll, sign, or player
             // Put customblock fake
-            mem_putc((int)CUSTOM_BLOCK, &bufferPtr);
-            mem_putc(get_id_char(src_board, offset), &bufferPtr);
-            mem_putc(get_id_color(src_board, offset), &bufferPtr);
-            mem_putc(level_under_id[offset], &bufferPtr);
-            mem_putc(level_under_param[offset], &bufferPtr);
-            mem_putc(level_under_color[offset], &bufferPtr);
+            mfputc((int)CUSTOM_BLOCK, mf);
+            mfputc(get_id_char(src_board, offset), mf);
+            mfputc(get_id_color(src_board, offset), mf);
+            mfputc(level_under_id[offset], mf);
+            mfputc(level_under_param[offset], mf);
+            mfputc(level_under_color[offset], mf);
           }
           else
           {
-            mem_putc(current_id, &bufferPtr);
-            mem_putc(level_param[offset], &bufferPtr);
-            mem_putc(level_color[offset], &bufferPtr);
-            mem_putc(level_under_id[offset], &bufferPtr);
-            mem_putc(level_under_param[offset], &bufferPtr);
-            mem_putc(level_under_color[offset], &bufferPtr);
+            mfputc(current_id, mf);
+            mfputc(level_param[offset], mf);
+            mfputc(level_color[offset], mf);
+            mfputc(level_under_id[offset], mf);
+            mfputc(level_under_param[offset], mf);
+            mfputc(level_under_color[offset], mf);
           }
         }
         offset += line_skip;
@@ -194,26 +195,27 @@ static void save_mzm_common(struct world *mzx_world, int start_x, int start_y,
       if(num_robots)
       {
         struct robot **robot_list = src_board->robot_list;
+        size_t total_size;
         char name[4];
 
         // Now we're at the position we want to start writing robots.
-        robot_table_position = bufferPtr - (unsigned char *)buffer;
+        robot_table_position = mftell(mf);
 
-        // Go back to header to put robot table information
-        bufferPtr = buffer;
-        bufferPtr += 8;
+        // Go back to header to put robot table information.
+        mfseek(mf, 8, SEEK_SET);
         // Where the robots will be stored
         // (not actually necessary anymore)
-        mem_putd(robot_table_position, &bufferPtr);
+        mfputd(robot_table_position, mf);
         // Number of robots
-        mem_putc(num_robots, &bufferPtr);
+        mfputc(num_robots, mf);
         // Skip board storage mode
-        bufferPtr += 1;
+        mf->current += 1;
         // Savegame mode for robots
-        mem_putc(savegame, &bufferPtr);
+        mfputc(savegame, mf);
 
         // Open the zip and write our robots into it.
-        zp = zip_open_mem_write(buffer, mzm_size, robot_table_position);
+        zp = zip_open_mem_write(mf->start, mf->end - mf->start,
+         robot_table_position);
 
         for(i = 0; i < num_robots; i++)
         {
@@ -224,15 +226,15 @@ static void save_mzm_common(struct world *mzx_world, int start_x, int start_y,
            savegame, MZX_VERSION, name);
         }
 
-        zip_close(zp, NULL);
+        zip_close(zp, &total_size);
+        return total_size;
       }
-
-      break;
+      return mftell(mf);
     }
 
     // Overlay/Vlayer
-    case 1:
-    case 2:
+    case MZM_OVERLAY_TO_LAYER_STORAGE:
+    case MZM_VLAYER_TO_LAYER_STORAGE:
     {
       struct board *src_board = mzx_world->current_board;
       int board_width;
@@ -242,7 +244,7 @@ static void save_mzm_common(struct world *mzx_world, int start_x, int start_y,
       char *chars;
       char *colors;
 
-      if(mode == 1)
+      if(mode == MZM_OVERLAY_TO_LAYER_STORAGE)
       {
         // Overlay
         if(!src_board->overlay_mode)
@@ -267,17 +269,16 @@ static void save_mzm_common(struct world *mzx_world, int start_x, int start_y,
       {
         for(x = 0; x < width; x++, offset++)
         {
-          mem_putc(chars[offset], &bufferPtr);
-          mem_putc(colors[offset], &bufferPtr);
+          mfputc(chars[offset], mf);
+          mfputc(colors[offset], mf);
         }
         offset += line_skip;
       }
-
-      break;
+      return mftell(mf);
     }
 
     // Board, char based
-    case 3:
+    case MZM_BOARD_TO_LAYER_STORAGE:
     {
       struct board *src_board = mzx_world->current_board;
       int board_width = src_board->board_width;
@@ -289,186 +290,176 @@ static void save_mzm_common(struct world *mzx_world, int start_x, int start_y,
       {
         for(x = 0; x < width; x++, offset++)
         {
-          mem_putc(get_id_char(src_board, offset), &bufferPtr);
-          mem_putc(get_id_color(src_board, offset), &bufferPtr);
+          mfputc(get_id_char(src_board, offset), mf);
+          mfputc(get_id_color(src_board, offset), mf);
         }
         offset += line_skip;
       }
-
-      break;
+      return mftell(mf);
     }
   }
-}
-
-static void *mem_allocate(size_t length, void **dest)
-{
-  size_t *dataPtr;
-  *dest = malloc(length + sizeof(size_t));
-  dataPtr = *dest;
-  dataPtr[0] = length;
-  return &dataPtr[1];
+  return 0;
 }
 
 void save_mzm(struct world *mzx_world, char *name, int start_x, int start_y,
  int width, int height, int mode, int savegame)
 {
-  FILE *output_file = fopen_unsafe(name, "wb");
-  size_t *buffer;
-  size_t length;
+  vfile *output_file = vfopen_unsafe(name, "wb");
+  enum mzm_storage_mode storage_mode;
+  struct memfile mf;
+  void *buffer;
+  size_t mzm_size;
+
   if(output_file)
   {
-    buffer = NULL;
-    save_mzm_common(mzx_world, start_x, start_y, width, height, mode, savegame,
-     mem_allocate, (void **)(&buffer));
-    length = buffer[0];
-    fwrite(&buffer[1], length, 1, output_file);
+    mzm_size = save_mzm_calculate_size(mzx_world, start_x, start_y, width,
+     height, mode, savegame, &storage_mode);
+
+    buffer = cmalloc(mzm_size);
+    mfopen(buffer, mzm_size, &mf);
+
+    mzm_size = save_mzm_common(mzx_world, start_x, start_y, width, height, mode,
+     savegame, storage_mode, &mf);
+
+    vfwrite(buffer, mzm_size, 1, output_file);
     free(buffer);
-    fclose(output_file);
+    vfclose(output_file);
   }
-}
-
-struct str_allocate_data {
-  struct string *str;
-  const char *name;
-  struct world *mzx_world;
-  int id;
-};
-
-static void *str_allocate(size_t length, void **dest)
-{
-  struct str_allocate_data **dataPtr = (struct str_allocate_data **)dest;
-  struct str_allocate_data *data = *dataPtr;
-
-  data->str = new_string(data->mzx_world, data->name, length, data->id);
-
-  return data->str->value;
 }
 
 void save_mzm_string(struct world *mzx_world, const char *name, int start_x,
  int start_y, int width, int height, int mode, int savegame, int id)
 {
-  struct str_allocate_data *data = malloc(sizeof(struct str_allocate_data));
+  enum mzm_storage_mode storage_mode;
+  struct memfile mf;
+  struct string *str;
+  size_t mzm_size;
 
-  data->str = NULL;
-  data->name = name;
-  data->mzx_world = mzx_world;
-  data->id = id;
+  mzm_size = save_mzm_calculate_size(mzx_world, start_x, start_y, width,
+   height, mode, savegame, &storage_mode);
 
-  save_mzm_common(mzx_world, start_x, start_y, width, height, mode, savegame,
-   str_allocate, (void **)(&data));
-  free(data);
+  str = new_string(mzx_world, name, mzm_size, id);
+  if(str)
+  {
+    mfopen(str->value, mzm_size, &mf);
+
+    mzm_size = save_mzm_common(mzx_world, start_x, start_y, width, height, mode,
+     savegame, storage_mode, &mf);
+
+    // Shrink the string length to the final size of the MZM.
+    str->length = mzm_size;
+  }
 }
 
-static int load_mzm_header(const unsigned char **_bufferptr, int file_length,
- int *width, int *height, int *storage_mode, int *savegame_mode,
- int *num_robots, int *robots_location, int *mzm_world_version)
+static boolean read_mzm_header(struct memfile *mf, size_t file_length,
+ struct mzm_header *mzm_header)
 {
-  const unsigned char *bufferptr = *_bufferptr;
   char magic_string[5];
 
   if(file_length < 16)
-    return -1;
+    return false;
 
   // MegaZeux 2.83 is the last version that won't save the ver,
   // so if we don't have a ver, just act like it's 2.83
-  *mzm_world_version = V283;
+  mzm_header->world_version = V283;
 
-  memcpy(magic_string, bufferptr, 4);
+  mfread(magic_string, 4, 1, mf);
   magic_string[4] = 0;
-  bufferptr += 4;
 
   if(!strncmp(magic_string, "MZMX", 4))
   {
     // An MZM1 file is always storage mode 0
-    *storage_mode = 0;
-    *savegame_mode = 0;
-    *num_robots = 0;
-    *robots_location = 0;
-    *width = mem_getc(&bufferptr);
-    *height = mem_getc(&bufferptr);
-    bufferptr += 10;
+    mzm_header->storage_mode = MZM_STORAGE_MODE_BOARD;
+    mzm_header->savegame_mode = 0;
+    mzm_header->num_robots = 0;
+    mzm_header->robots_location = 0;
+    mzm_header->width = mfgetc(mf);
+    mzm_header->height = mfgetc(mf);
+    mf->current += 10; // unused
   }
   else
 
   if(!strncmp(magic_string, "MZM2", 4))
   {
-    *width = mem_getw(&bufferptr);
-    *height = mem_getw(&bufferptr);
-    *robots_location = mem_getd(&bufferptr);
-    *num_robots = mem_getc(&bufferptr);
-    *storage_mode = mem_getc(&bufferptr);
-    *savegame_mode = mem_getc(&bufferptr);
-    bufferptr += 1; // unused
+    mzm_header->width = mfgetw(mf);
+    mzm_header->height = mfgetw(mf);
+    mzm_header->robots_location = mfgetd(mf);
+    mzm_header->num_robots = mfgetc(mf);
+    mzm_header->storage_mode = mfgetc(mf);
+    mzm_header->savegame_mode = mfgetc(mf);
+    mf->current += 1; // unused
   }
   else
 
   if(!strncmp(magic_string, "MZM3", 4))
   {
     if(file_length < 20)
-      return -1;
+      return false;
 
     // MZM3 is like MZM2, except the robots are stored as source code if
     // savegame_mode is 0 and version >= VERSION_SOURCE.
-    *width = mem_getw(&bufferptr);
-    *height = mem_getw(&bufferptr);
-    *robots_location = mem_getd(&bufferptr);
-    *num_robots = mem_getc(&bufferptr);
-    *storage_mode = mem_getc(&bufferptr);
-    *savegame_mode = mem_getc(&bufferptr);
-    *mzm_world_version = mem_getw(&bufferptr);
-    bufferptr += 3; // unused
+    mzm_header->width = mfgetw(mf);
+    mzm_header->height = mfgetw(mf);
+    mzm_header->robots_location = mfgetd(mf);
+    mzm_header->num_robots = mfgetc(mf);
+    mzm_header->storage_mode = mfgetc(mf);
+    mzm_header->savegame_mode = mfgetc(mf);
+    mzm_header->world_version = mfgetw(mf);
+    mf->current += 3; // unused
   }
-
   else
-    return -1;
+    return false;
 
-  *_bufferptr = bufferptr;
-  return 0;
+  // Perform minimal validation on the header data to make sure it isn't junk.
+  if(mzm_header->savegame_mode < 0 || mzm_header->savegame_mode > 1)
+    return false;
+
+  if(mzm_header->storage_mode != MZM_STORAGE_MODE_BOARD
+   && mzm_header->storage_mode != MZM_STORAGE_MODE_LAYER)
+    return false;
+
+  if(mzm_header->width < 1 || mzm_header->width >= 32768 ||
+   mzm_header->height < 1 || mzm_header->height >= 32768 ||
+   (mzm_header->width * mzm_header->height) > MAX_BOARD_SIZE)
+    return false;
+
+  return true;
 }
 
 // This will clip.
 
-static int load_mzm_common(struct world *mzx_world, const void *buffer,
- int file_length, int start_x, int start_y, int mode, int savegame, char *name)
+static int load_mzm_common(struct world *mzx_world, struct memfile *mf,
+ int file_length, int start_x, int start_y, int mode, int savegame,
+ enum thing layer_convert_id, char *name)
 {
-  const unsigned char *bufferPtr = buffer;
-
-  int storage_mode;
-  int width;
-  int height;
-  int savegame_mode;
-  int num_robots;
-  int robots_location;
-  int mzm_world_version;
+  struct mzm_header mzm;
 
   int data_start;
   int expected_data_size;
 
-  if(load_mzm_header(&bufferPtr, file_length, &width, &height, &storage_mode,
-   &savegame_mode, &num_robots, &robots_location, &mzm_world_version))
+  if(!is_storageless(layer_convert_id))
+    layer_convert_id = CUSTOM_BLOCK;
+
+  if(!read_mzm_header(mf, file_length, &mzm))
     goto err_invalid;
 
-  data_start = bufferPtr - (const unsigned char *)buffer;
-  expected_data_size = (width * height) * (storage_mode ? 2 : 6);
+  data_start = mftell(mf);
+  expected_data_size = (mzm.width * mzm.height) * (mzm.storage_mode ? 2 : 6);
 
-  // Validate
-  if(
-   (savegame_mode > 1) || (savegame_mode < 0) // Invalid save mode
-   || (storage_mode > 1) || (storage_mode < 0) // Invalid storage mode
-   || (file_length - data_start < expected_data_size) // not enough space
-   || (file_length < robots_location) // The end of file is before the robots
-   || (robots_location && (expected_data_size + data_start > robots_location))
-    )
+  // Validate MZM size, robots location (the other fields have been validated).
+  if((file_length - data_start < expected_data_size) // not enough space
+   || (file_length < mzm.robots_location) // The end of file is before the robots
+   || (mzm.robots_location && (expected_data_size + data_start > mzm.robots_location)))
     goto err_invalid;
 
   // If the mzm version is newer than the MZX version, notify
-  if(mzm_world_version > MZX_VERSION)
+  if(mzm.world_version > MZX_VERSION)
   {
-    error_message(E_MZM_FILE_VERSION_TOO_RECENT, mzm_world_version, name);
+    error_message(E_MZM_FILE_VERSION_TOO_RECENT, mzm.world_version, name);
   }
 
   // If the MZM is a save MZM but we're not loading at runtime, notify
-  if(savegame_mode > savegame)
+  if(mzm.savegame_mode > savegame)
   {
     error_message(E_MZM_FILE_FROM_SAVEGAME, 0, name);
   }
@@ -476,13 +467,13 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
   switch(mode)
   {
     // Write to board
-    case 0:
+    case MZM_LOAD_TO_BOARD:
     {
       struct board *src_board = mzx_world->current_board;
       int board_width = src_board->board_width;
       int board_height = src_board->board_height;
-      int effective_width = width;
-      int effective_height = height;
+      int effective_width = mzm.width;
+      int effective_height = mzm.height;
       int file_line_skip;
       int line_skip;
       int x, y;
@@ -505,9 +496,9 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
 
       line_skip = board_width - effective_width;
 
-      switch(storage_mode)
+      switch(mzm.storage_mode)
       {
-        case 0:
+        case MZM_STORAGE_MODE_BOARD:
         {
           // Board style, write as is
           enum thing current_id;
@@ -517,13 +508,13 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
           int width_difference;
           int i;
 
-          width_difference = width - effective_width;
+          width_difference = mzm.width - effective_width;
 
           for(y = 0; y < effective_height; y++)
           {
             for(x = 0; x < effective_width; x++, offset++)
             {
-              current_id = (enum thing)mem_getc(&bufferPtr);
+              current_id = (enum thing)mfgetc(mf);
 
               if(current_id >= SENSOR)
               {
@@ -558,11 +549,11 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
               if(src_id != PLAYER)
               {
                 level_id[offset] = current_id;
-                level_param[offset] = mem_getc(&bufferPtr);
-                level_color[offset] = mem_getc(&bufferPtr);
-                level_under_id[offset] = mem_getc(&bufferPtr);
-                level_under_param[offset] = mem_getc(&bufferPtr);
-                level_under_color[offset] = mem_getc(&bufferPtr);
+                level_param[offset] = mfgetc(mf);
+                level_color[offset] = mfgetc(mf);
+                level_under_id[offset] = mfgetc(mf);
+                level_under_param[offset] = mfgetc(mf);
+                level_under_color[offset] = mfgetc(mf);
 
                 // We don't want this on the under layer, thanks
                 if(level_under_id[offset] >= SENSOR)
@@ -573,9 +564,7 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
                 }
               }
               else
-              {
-                bufferPtr += 5;
-              }
+                mf->current += 5;
             }
 
             offset += line_skip;
@@ -583,8 +572,8 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
             // Gotta run through and mark the next robots to be skipped
             for(i = 0; i < width_difference; i++)
             {
-              current_id = (enum thing)mem_getc(&bufferPtr);
-              bufferPtr += 5;
+              current_id = (enum thing)mfgetc(mf);
+              mf->current += 5;
 
               if(is_robot(current_id))
               {
@@ -594,12 +583,12 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
             }
           }
 
-          for(i = current_robot_loaded; i < num_robots; i++)
+          for(i = current_robot_loaded; i < mzm.num_robots; i++)
           {
             robot_x_locations[i] = -1;
           }
 
-          if(num_robots)
+          if(mzm.num_robots)
           {
             struct zip_archive *zp;
             unsigned int file_id;
@@ -626,21 +615,19 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
             // Reset the error count.
             get_and_reset_error_count();
 
-            if(mzm_world_version <= MZX_LEGACY_FORMAT_VERSION)
+            if(mzm.world_version <= MZX_LEGACY_FORMAT_VERSION)
             {
               robot_partial_size =
-               legacy_calculate_partial_robot_size(savegame_mode,
-               mzm_world_version);
+               legacy_calculate_partial_robot_size(mzm.savegame_mode,
+               mzm.world_version);
 
-              bufferPtr = buffer;
-              bufferPtr += robots_location;
+              mfseek(mf, mzm.robots_location, SEEK_SET);
               zp = NULL;
             }
-
             else
             {
-              zp = zip_open_mem_read(buffer, file_length);
-              assign_fprops(zp, 1);
+              zp = zip_open_mem_read(mf->start, file_length);
+              world_assign_file_ids(zp, false);
             }
 
             // If we're loading a "runtime MZM" then it means that we're loading
@@ -649,13 +636,13 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
             // dynamically created MZMs in the editor is still useful, we'll just
             // dummy out the robots.
 
-            if((savegame_mode > savegame) ||
-             (MZX_VERSION < mzm_world_version))
+            if((mzm.savegame_mode > savegame) ||
+             (MZX_VERSION < mzm.world_version))
             {
               dummy = 1;
             }
 
-            for(i = 0; i < num_robots; i++)
+            for(i = 0; i < mzm.num_robots; i++)
             {
               cur_robot = cmalloc(sizeof(struct robot));
 
@@ -666,11 +653,11 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
               // chars for dummy robots on clipped MZMs might be off. This
               // shouldn't matter too often though.
 
-              if(mzm_world_version <= MZX_LEGACY_FORMAT_VERSION)
+              if(mzm.world_version <= MZX_LEGACY_FORMAT_VERSION)
               {
                 create_blank_robot(cur_robot);
 
-                current_position = bufferPtr - (const unsigned char *)buffer;
+                current_position = mftell(mf);
 
                 // If we fail, we have to continue, or robots won't be dummied
                 // correctly. In this case, seek to the end.
@@ -678,33 +665,35 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
                 if(current_position + robot_partial_size <= file_length)
                 {
                   robot_calculated_size =
-                   legacy_load_robot_calculate_size(bufferPtr, savegame_mode,
-                   mzm_world_version);
+                   legacy_load_robot_calculate_size(mf->current, mzm.savegame_mode,
+                   mzm.world_version);
 
                   if(current_position + robot_calculated_size <= file_length)
                   {
-                    legacy_load_robot_from_memory(mzx_world, cur_robot, bufferPtr,
-                     savegame_mode, mzm_world_version, (int)current_position);
+                    struct memfile r_mf;
+                    mfopen(mf->current, robot_calculated_size, &r_mf);
+                    legacy_load_robot_from_memory(mzx_world, cur_robot, &r_mf,
+                     mzm.savegame_mode, mzm.world_version, (int)current_position);
                   }
                   else
                   {
-                    bufferPtr = (const unsigned char*)buffer + file_length;
+                    mfseek(mf, 0, SEEK_END);
                     dummy = 1;
                   }
                 }
                 else
                 {
-                  bufferPtr = (const unsigned char*)buffer + file_length;
+                  mfseek(mf, 0, SEEK_END);
                   dummy = 1;
                 }
 
-                bufferPtr += robot_calculated_size;
+                mf->current += robot_calculated_size;
               }
 
               // Search the zip until a robot is found.
               else do
               {
-                result = zip_get_next_prop(zp, &file_id, NULL, &robot_id);
+                result = zip_get_next_mzx_file_id(zp, &file_id, NULL, &robot_id);
 
                 if(result != ZIP_SUCCESS)
                 {
@@ -716,7 +705,7 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
                 }
                 else
 
-                if(file_id != FPROP_ROBOT || (int)robot_id < i)
+                if(file_id != FILE_ID_ROBOT || (int)robot_id < i)
                 {
                   // Not a robot or is a skipped robot
                   zip_skip_file(zp);
@@ -733,8 +722,8 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
 
                 else
                 {
-                  load_robot(mzx_world, cur_robot, zp, savegame_mode,
-                   mzm_world_version);
+                  load_robot(mzx_world, cur_robot, zp, mzm.savegame_mode,
+                   mzm.world_version);
                   break;
                 }
               }
@@ -763,7 +752,7 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
 
 #ifdef CONFIG_DEBYTECODE
                 // If we're loading source code at runtime, we need to compile it
-                if(savegame_mode < savegame)
+                if(mzm.savegame_mode < savegame)
                   prepare_robot_bytecode(mzx_world, cur_robot);
 #endif
 
@@ -805,7 +794,7 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
               }
             }
 
-            if(mzm_world_version > MZX_LEGACY_FORMAT_VERSION)
+            if(mzm.world_version > MZX_LEGACY_FORMAT_VERSION)
             {
               zip_close(zp, NULL);
             }
@@ -817,12 +806,12 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
           break;
         }
 
-        case 1:
+        case MZM_STORAGE_MODE_LAYER:
         {
           // Compact style; expand to customblocks
           // Board style, write as is
 
-          file_line_skip = (width - effective_width) * 2;
+          file_line_skip = (mzm.width - effective_width) * 2;
 
           for(y = 0; y < effective_height; y++)
           {
@@ -844,21 +833,19 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
               // Don't allow the player to be overwritten
               if(src_id != PLAYER)
               {
-                level_id[offset] = CUSTOM_BLOCK;
-                level_param[offset] = mem_getc(&bufferPtr);
-                level_color[offset] = mem_getc(&bufferPtr);
+                level_id[offset] = layer_convert_id;
+                level_param[offset] = mfgetc(mf);
+                level_color[offset] = mfgetc(mf);
                 level_under_id[offset] = 0;
                 level_under_param[offset] = 0;
                 level_under_color[offset] = 0;
               }
               else
-              {
-                bufferPtr += 2;
-              }
+                mf->current += 2;
             }
 
             offset += line_skip;
-            bufferPtr += file_line_skip;
+            mf->current += file_line_skip;
           }
           break;
         }
@@ -867,22 +854,22 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
     }
 
     // Overlay/vlayer
-    case 1:
-    case 2:
+    case MZM_LOAD_TO_OVERLAY:
+    case MZM_LOAD_TO_VLAYER:
     {
       struct board *src_board = mzx_world->current_board;
       int dest_width = src_board->board_width;
       int dest_height = src_board->board_height;
       char *dest_chars;
       char *dest_colors;
-      int effective_width = width;
-      int effective_height = height;
+      int effective_width = mzm.width;
+      int effective_height = mzm.height;
       int file_line_skip;
       int line_skip;
       int x, y;
       int offset;
 
-      if(mode == 1)
+      if(mode == MZM_LOAD_TO_OVERLAY)
       {
         // Overlay
         if(!src_board->overlay_mode)
@@ -914,48 +901,48 @@ static int load_mzm_common(struct world *mzx_world, const void *buffer,
 
       line_skip = dest_width - effective_width;
 
-      switch(storage_mode)
+      switch(mzm.storage_mode)
       {
-        case 0:
+        case MZM_STORAGE_MODE_BOARD:
         {
           // Coming from board storage; for now use param as char
 
-          file_line_skip = (width - effective_width) * 6;
+          file_line_skip = (mzm.width - effective_width) * 6;
 
           for(y = 0; y < effective_height; y++)
           {
             for(x = 0; x < effective_width; x++, offset++)
             {
               // Skip ID
-              bufferPtr += 1;
-              dest_chars[offset] = mem_getc(&bufferPtr);
-              dest_colors[offset] = mem_getc(&bufferPtr);
+              mf->current += 1;
+              dest_chars[offset] = mfgetc(mf);
+              dest_colors[offset] = mfgetc(mf);
               // Skip under parts
-              bufferPtr += 3;
+              mf->current += 3;
             }
 
             offset += line_skip;
-            bufferPtr += file_line_skip;
+            mf->current += file_line_skip;
           }
           break;
         }
 
-        case 1:
+        case MZM_STORAGE_MODE_LAYER:
         {
           // Coming from layer storage; transfer directly
 
-          file_line_skip = (width - effective_width) * 2;
+          file_line_skip = (mzm.width - effective_width) * 2;
 
           for(y = 0; y < effective_height; y++)
           {
             for(x = 0; x < effective_width; x++, offset++)
             {
-              dest_chars[offset] = mem_getc(&bufferPtr);
-              dest_colors[offset] = mem_getc(&bufferPtr);
+              dest_chars[offset] = mfgetc(mf);
+              dest_colors[offset] = mfgetc(mf);
             }
 
             offset += line_skip;
-            bufferPtr += file_line_skip;
+            mf->current += file_line_skip;
           }
           break;
         }
@@ -981,22 +968,21 @@ err_invalid:
 }
 
 int load_mzm(struct world *mzx_world, char *name, int start_x, int start_y,
- int mode, int savegame)
+ int mode, int savegame, enum thing layer_convert_id)
 {
-  FILE *input_file;
+  vfile *input_file;
   size_t file_size;
   void *buffer;
   int success;
   int count;
-  input_file = fopen_unsafe(name, "rb");
+  struct memfile mf;
+  input_file = vfopen_unsafe(name, "rb");
   if(input_file)
   {
-    fseek(input_file, 0, SEEK_END);
-    file_size = ftell(input_file);
+    file_size = vfilelength(input_file, false);
     buffer = cmalloc(file_size);
-    fseek(input_file, 0, SEEK_SET);
-    count = fread(buffer, file_size, 1, input_file);
-    fclose(input_file);
+    count = vfread(buffer, file_size, 1, input_file);
+    vfclose(input_file);
 
     if(!count)
     {
@@ -1004,8 +990,9 @@ int load_mzm(struct world *mzx_world, char *name, int start_x, int start_y,
       return -1;
     }
 
-    success = load_mzm_common(mzx_world, buffer, (int)file_size, start_x,
-     start_y, mode, savegame, name);
+    mfopen(buffer, file_size, &mf);
+    success = load_mzm_common(mzx_world, &mf, (int)file_size, start_x,
+     start_y, mode, savegame, layer_convert_id, name);
     free(buffer);
     return success;
   }
@@ -1017,34 +1004,36 @@ int load_mzm(struct world *mzx_world, char *name, int start_x, int start_y,
 }
 
 int load_mzm_memory(struct world *mzx_world, char *name, int start_x,
- int start_y, int mode, int savegame, const void *buffer, size_t length)
+ int start_y, int mode, int savegame, enum thing layer_convert_id,
+ const void *buffer, size_t length)
 {
-  return load_mzm_common(mzx_world, buffer, (int)length, start_x, start_y,
-   mode, savegame, name);
+  struct memfile mf;
+  mfopen(buffer, length, &mf);
+  return load_mzm_common(mzx_world, &mf, (int)length, start_x, start_y,
+   mode, savegame, layer_convert_id, name);
 }
 
-void load_mzm_size(char *name, int *width, int *height)
+boolean load_mzm_header(char *name, struct mzm_header *mzm_header)
 {
-  FILE *input_file;
-  const unsigned char *bufferptr;
+  vfile *input_file;
+  struct memfile mf;
   char buffer[20];
   int read_length;
-  int ignore;
 
-  *width = -1;
-  *height = -1;
+  mzm_header->width = -1;
+  mzm_header->height = -1;
 
-  input_file = fopen_unsafe(name, "rb");
+  input_file = vfopen_unsafe(name, "rb");
   if(input_file)
   {
-    read_length = fread(buffer, 1, 20, input_file);
-    fclose(input_file);
+    read_length = vfread(buffer, 1, 20, input_file);
+    vfclose(input_file);
 
-    bufferptr = (const unsigned char *)buffer;
+    mfopen(buffer, read_length, &mf);
+    if(read_mzm_header(&mf, read_length, mzm_header))
+      return true;
 
-    load_mzm_header(&bufferptr, read_length, width, height,
-     &ignore, &ignore, &ignore, &ignore, &ignore);
+    error_message(E_MZM_FILE_INVALID, 0, name);
   }
-
-  return;
+  return false;
 }

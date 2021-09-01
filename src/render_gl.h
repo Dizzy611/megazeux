@@ -26,7 +26,9 @@
 
 __M_BEGIN_DECLS
 
+#include "configure.h"
 #include "graphics.h"
+#include "platform.h"
 #include "util.h"
 
 #ifdef CONFIG_SDL
@@ -38,7 +40,7 @@ __M_BEGIN_DECLS
 #include <SDL_opengles2.h>
 #endif
 #else
-#include "SDL_opengl.h"
+#include <SDL_opengl.h>
 #endif
 #endif
 
@@ -55,9 +57,6 @@ __M_BEGIN_DECLS
 // Next power of 2 over SCREEN_PIX_H
 #define GL_POWER_2_HEIGHT         512
 
-#define CONFIG_GL_FILTER_LINEAR   "linear"
-#define CONFIG_GL_FILTER_NEAREST  "nearest"
-
 extern const float vertex_array_single[2 * 4];
 
 #ifdef DEBUG
@@ -69,7 +68,7 @@ static inline void gl_error(const char *file, int line,
 #endif
 
 boolean gl_load_syms(const struct dso_syms_map *map);
-void gl_set_filter_method(const char *method,
+void gl_set_filter_method(enum gl_filter_type method,
  void (GL_APIENTRY *glTexParameterf_p)(GLenum target, GLenum pname,
   GLfloat param));
 void get_context_width_height(struct graphics_data *graphics,
@@ -89,6 +88,31 @@ enum gl_lib_type
   GL_LIB_FIXED,
   GL_LIB_PROGRAMMABLE,
 };
+
+#if PLATFORM_BYTE_ORDER == PLATFORM_BIG_ENDIAN
+/**
+ * The GL renderers use GL_UNSIGNED_BYTE for 32-bit texture buffers for GLES 2
+ * compatibility. This leads to some problems when packing bytes on big endian
+ * machines because each of these packings assumes GL_UNSIGNED_INT_8_8_8_8_REV
+ * (which isn't in GLES 2).
+ *
+ * TODO: bswap32 here if compatibility defines for it are added.
+ */
+static inline uint32_t gl_pack_u32(uint32_t x)
+{
+  return
+   ((x & 0xFF000000) >> 24) |
+   ((x & 0x00FF0000) >> 8) |
+   ((x & 0x0000FF00) << 8) |
+   ((x & 0x000000FF) << 24);
+}
+#else
+/**
+ * For little endian, GL_UNSIGNED_BYTE and GL_UNSIGNED_INT_8_8_8_8_REV are
+ * equivalent, so don't change anything.
+ */
+#define gl_pack_u32(x) (x)
+#endif
 
 __M_END_DECLS
 

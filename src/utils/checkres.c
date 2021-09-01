@@ -23,6 +23,10 @@
 
 #include "../config.h"
 
+#ifndef VERSION_DATE
+#define VERSION_DATE
+#endif
+
 #define USAGE \
  "checkres :: MegaZeux " VERSION VERSION_DATE "\n" \
  "Usage: checkres [options] " \
@@ -46,7 +50,8 @@
  "\nGeneral options:\n" \
  " -h   Display this message and exit.\n"                                   \
  "\nStatus options:\n" \
- " -a   Display all found, created, missing, and unused files.\n"           \
+ " -a   Display all found, created, missing, wildcard, and unused files.\n" \
+ " -A   Display all found, created, missing, and wildcard files.\n"         \
  " -C   Only display created files.\n"                                      \
  " -F   Only display found files.\n"                                        \
  " -M   Only display missing files (default).\n"                            \
@@ -62,45 +67,47 @@
  " -v   Display all references with sfx#, board#, robot#.\n"                \
  " -vv  Display all references with sfx#, board#, robot#, line#, coords.\n" \
  " -1   Display unique filenames, one per line, with no other info.\n"      \
+ " -z   Also display CRC-32 values from zip central directory (zip only).\n"\
+ "\nOutput options:\n" \
+ " -V   Output CSV instead of preformatted text.\n"                         \
  "\nSorting options:\n" \
  " -N   Sort by referenced filename, then by location (default).\n"         \
  " -L   Sort by location of reference: world, board#, robot#.\n"            \
  "\n"
 
 #include <ctype.h>
-#include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #ifdef __WIN32__
 #include <strings.h>
 #endif
 
-// Defines so checkres builds when this is included.
-// This is because khashmzx.h uses the check_alloc functions (CORE_LIBSPEC)
-// and memcasecmp.h (which needs platform_endian.h and thus SDL_endian.h).
+// Defines so checkres builds when MZX headers are included.
 #define SKIP_SDL
 #define CORE_LIBSPEC
-#include "../../contrib/khash/khashmzx.h"
 
 // From MZX itself:
 
 // Safe- self sufficient or completely macros/static inlines
 #include "../const.h"
+#include "../hashtable.h"
 #include "../memcasecmp.h"
-#include "../memfile.h"
 #include "../world_format.h"
-#include "../zip.h"
+#include "../io/memfile.h"
+#include "../io/vio.h"
+#include "../io/zip.h"
 
 // Contains some CORE_LIBSPEC functions, which should be fine if the object
 // is included in linking due to the CORE_LIBSPEC define above. Right now,
 // checkres needs fsafeopen.o and util.o.
-#include "../fsafeopen.h"
+#include "../io/fsafeopen.h"
 #include "../util.h"
 #include "../world.h"
+
+#include "utils_alloc.h"
 
 #ifdef CONFIG_PLEDGE_UTILS
 #include <unistd.h>
@@ -143,6 +150,10 @@ static boolean display_filename_only = false;
 static boolean display_first_only = true;
 static boolean display_details = false;
 static boolean display_all_details = false;
+static boolean display_crc32 = false;
+
+// Output format options
+static boolean output_format_csv = false;
 
 static enum
 {
@@ -164,6 +175,7 @@ enum status
   MALLOC_FAILED,
   PROTECTED_WORLD,
   MAGIC_CHECK_FAILED,
+  MZX_100_NOT_SUPPORTED,
   DIRENT_FAILED,
   ZIP_FAILED,
   NO_WORLD,
@@ -173,17 +185,6 @@ enum status
 #define warnhere(...) \
  do{ fprintf(stderr, "At " __FILE__ ":%d: ", __LINE__); \
   fprintf(stderr, "" __VA_ARGS__); fflush(stderr); }while(0)
-
-// MegaZeux's obtuse architecture requires this for the time being.
-// This function is used in out_of_memory_check (util.c), and check alloc
-// is required by zip.c (as it should be). util.c is also required by the
-// directory reading functions in fsafeopen.c on non-Win32 platforms.
-
-int error(const char *message, unsigned int a, unsigned int b, unsigned int c)
-{
-  fprintf(stderr, "%s\n", message);
-  exit(-1);
-}
 
 static const char *decode_status(enum status status)
 {
@@ -209,6 +210,8 @@ static const char *decode_status(enum status status)
       return "Protected worlds currently unsupported.";
     case MAGIC_CHECK_FAILED:
       return "File magic not consistent with 2.00 world or board.";
+    case MZX_100_NOT_SUPPORTED:
+      return "Worlds from MegaZeux 1.xx are not supported by this utility.";
     case DIRENT_FAILED:
       return "Failed to read a required directory.";
     case ZIP_FAILED:
@@ -220,7 +223,7 @@ static const char *decode_status(enum status status)
   }
 }
 
-static void _get_path(char *dest, const char *src)
+static boolean _get_path(char *dest, const char *src)
 {
   int i;
 
@@ -229,8 +232,14 @@ static void _get_path(char *dest, const char *src)
   while((src[i] != '/') && (src[i] != '\\') && i)
     i--;
 
-  strncpy(dest, src, i);
-  dest[i] = 0;
+  if(i > 0)
+  {
+    memcpy(dest, src, i);
+    dest[i] = '\0';
+    return true;
+  }
+  dest[0] = '\0';
+  return false;
 }
 
 static void join_path(char *dest, const char *dir, const char *file)
@@ -556,9 +565,9 @@ static boolean check_wildcard_path(const char *path, const char *wildcard)
   return false;
 }
 
-static void strcpy_fsafe(char *dest, const char *src)
+static void strcpy_fsafe(char *dest, size_t dest_len, const char *src)
 {
-  int result = fsafetranslate(src, dest);
+  int result = fsafetranslate(src, dest, dest_len);
 
   // SUCCESS - file was actually found physically
   // MATCH_FAILED - no file was found physically, which is fine here
@@ -572,71 +581,78 @@ static void strcpy_fsafe(char *dest, const char *src)
 static boolean path_search(const char *path_name, size_t base_len, int max_depth,
  void *data, void (*found_fn)(void *data, const char *name, size_t name_len))
 {
-  DIR *dir;
-  struct dirent *d;
+  vdir *dir;
   struct stat st;
   boolean join_paths = true;
 
   if(!strlen(path_name) || !strcmp(path_name, "."))
   {
-    dir = opendir(".");
+    dir = vdir_open(".");
     max_depth = MAX_PATH_DEPTH;
     join_paths = false;
     base_len = 0;
   }
   else
-    dir = opendir(path_name);
+    dir = vdir_open(path_name);
 
   if(dir)
   {
+    char buffer[MAX_PATH];
     char *_current = cmalloc(MAX_PATH);
     const char *current = NULL;
+    enum vdir_type type;
 
-    while((d = readdir(dir)) != NULL)
+    while(vdir_read(dir, buffer, MAX_PATH, &type))
     {
-      if(strcmp(d->d_name, ".") && strcmp(d->d_name, ".."))
+      if(strcmp(buffer, ".") && strcmp(buffer, ".."))
       {
         if(join_paths)
         {
-          join_path(_current, path_name, d->d_name);
+          join_path(_current, path_name, buffer);
           current = _current;
         }
         else
-          current = d->d_name;
+          current = buffer;
 
-        if(!stat(current, &st))
+        if(type == DIR_TYPE_UNKNOWN)
         {
-          if(S_ISDIR(st.st_mode))
+          if(!vstat(current, &st))
           {
-            // yolo
-            if(max_depth > 0)
-              path_search(current, base_len, max_depth - 1, data, found_fn);
-          }
-          else
+            if(S_ISREG(st.st_mode))
+              type = DIR_TYPE_FILE;
 
-          if(S_ISREG(st.st_mode))
+            if(S_ISDIR(st.st_mode))
+              type = DIR_TYPE_DIR;
+          }
+        }
+
+        if(type == DIR_TYPE_DIR)
+        {
+          // yolo
+          if(max_depth > 0)
+            path_search(current, base_len, max_depth - 1, data, found_fn);
+        }
+        else
+
+        if(type == DIR_TYPE_FILE)
+        {
+          // Strip off the base path if requested.
+          if(base_len && strlen(current) > base_len)
           {
-            // Strip off the base path if requested.
-            if(base_len && strlen(current) > base_len)
-            {
-              current += base_len;
-              while(*current == '\\' || *current == '/') current++;
-            }
-
-            found_fn(data, current, strlen(current));
+            current += base_len;
+            while(*current == '\\' || *current == '/') current++;
           }
+
+          found_fn(data, current, strlen(current));
         }
       }
     }
-    closedir(dir);
+    vdir_close(dir);
     free(_current);
     return true;
   }
   return false;
 }
-
-static int16_t robot_xpos[256];
-static int16_t robot_ypos[256];
 
 #define PARENT_DEFAULT_LEN 13
 #define RESOURCE_DEFAULT_LEN 14
@@ -652,14 +668,18 @@ static int16_t robot_ypos[256];
 static int started_table = 0;
 static int parent_max_len = PARENT_DEFAULT_LEN;
 static int resource_max_len = RESOURCE_DEFAULT_LEN;
+static boolean table_has_crc32 = false;
 
-static void output(const char *required_by,
- int board_num, int robot_num, int line_num,
- const char *resource_path, const char *status, const char *found_in)
+static void output_preformatted(const char *required_by,
+ int board_num, int robot_num, int line_num, int x, int y,
+ const char *resource_path, const char *status, const char *found_in,
+ uint32_t crc32, boolean has_crc32)
 {
   char details[DETAILS_MAX_LEN];
+  char crc[9] = "\0";
   int details_max_len = display_details ?
    (display_all_details ? DETAILS_MAX_LEN : DETAILS_SHORT_LEN) : 0;
+  int crc32_len = (display_crc32 && table_has_crc32) ? 11 : 0;
 
   if(!display_filename_only)
   {
@@ -669,19 +689,21 @@ static void output(const char *required_by,
     {
       fprintf(stdout, "\n");
 
-      fprintf(stdout, "%-*.*s  %-*.*s%-*.*s  %-10s %s\n",
+      fprintf(stdout, "%-*.*s  %-*.*s%-*.*s  %-10s%-*.*s %s\n",
        parent_max_len, parent_max_len, "Required by",
        details_max_len, details_max_len, "B#    R#    Line     Position",
        resource_max_len, resource_max_len, "Expected file",
        "Status",
+       crc32_len, crc32_len, "CRC-32",
        "Found in"
       );
 
-      fprintf(stdout, "%-*.*s  %-*.*s%-*.*s  %-10s %s\n",
+      fprintf(stdout, "%-*.*s  %-*.*s%-*.*s  %-10s%-*.*s %s\n",
        parent_max_len, parent_max_len, "-----------",
        details_max_len, details_max_len, "---   ---   ------   -----------",
        resource_max_len, resource_max_len, "-------------",
        "------",
+       crc32_len, crc32_len, "------",
        "--------"
       );
 
@@ -703,10 +725,7 @@ static void output(const char *required_by,
       else
       if(robot_num > 0)
       {
-        snprintf(xy, 14, "%d, %d",
-          robot_xpos[(unsigned char)robot_num],
-          robot_ypos[(unsigned char)robot_num]
-        );
+        snprintf(xy, 14, "%d, %d", (int16_t)x, (int16_t)y);
         snprintf(details, DETAILS_MAX_LEN,
           "b%-3.3s  r%-3.3s  %-6.6s   %-11.11s",
           board, robot, line, xy
@@ -734,21 +753,148 @@ static void output(const char *required_by,
     else
       details[0] = 0;
 
-    fprintf(stdout, "%-*.*s  %-*.*s%-*.*s  %-10s %s\n",
+    if(crc32_len && has_crc32)
+      snprintf(crc, 9, "%8.8"PRIx32, crc32);
+
+    fprintf(stdout, "%-*.*s  %-*.*s%-*.*s  %-10s%-*.*s %s\n",
      parent_max_len, parent_max_len, required_by,
      details_max_len, details_max_len, details,
      resource_max_len, resource_max_len, resource_path,
      status,
+     crc32_len, crc32_len, crc,
      found_in
     );
   }
-  else
+}
+
+static void output_csv(const char *required_by,
+ int board_num, int robot_num, int line_num, int x, int y,
+ const char *resource_path, const char *status, const char *found_in,
+ uint32_t crc32, boolean has_crc32)
+{
+  // TODO add proper escaping for the filenames.
+  found_in = found_in ? found_in : "";
+
+  if(!started_table)
+  {
+    fprintf(stdout, "Required by,");
+    if(display_details)
+    {
+      fprintf(stdout, "Board #,Robot #,");
+      if(display_all_details)
+        fprintf(stdout, "Line,Position,");
+    }
+    fprintf(stdout, "Expected file,Status,");
+
+    if(display_crc32)
+      fprintf(stdout, "CRC-32,");
+
+    fprintf(stdout, "Found in\n");
+
+    started_table = 1;
+  }
+
+  fprintf(stdout, "%s,", required_by);
+
+  if(display_details)
+  {
+    const char *filler = display_all_details ? ",," : "";
+
+    if(board_num == DONT_PRINT)
+    {
+      fprintf(stdout, ",,%s", filler);
+    }
+    else
+
+    if(board_num == IS_SFX)
+    {
+      fprintf(stdout, "sfx,%d,%s", robot_num, filler);
+    }
+    else
+
+    if(robot_num > 0)
+    {
+      if(display_all_details)
+      {
+        fprintf(stdout, "b%d,r%d,%d,\"(%d,%d)\",",
+          board_num, robot_num, line_num, x, y
+        );
+      }
+      else
+        fprintf(stdout, "b%d,r%d,", board_num, robot_num);
+    }
+    else
+
+    if(board_num == NO_BOARD && robot_num == GLOBAL_ROBOT)
+    {
+      if(display_all_details)
+      {
+        fprintf(stdout, ",gl,%d,\"(-1,-1)\",", line_num);
+      }
+      else
+        fprintf(stdout, ",gl,");
+    }
+    else
+
+    if(robot_num == IS_BOARD_MOD)
+    {
+      fprintf(stdout, "b%d,mod,%s", board_num, filler);
+    }
+    else
+
+    if(robot_num == IS_BOARD_CHARSET)
+    {
+      fprintf(stdout, "b%d,chr,%s", board_num, filler);
+    }
+    else
+
+    if(robot_num == IS_BOARD_PALETTE)
+    {
+      fprintf(stdout, "b%d,pal,%s", board_num, filler);
+    }
+    else
+      fprintf(stdout, "(unknown),,%s", filler);
+  }
+
+  fprintf(stdout, "%s,%s,", resource_path, status);
+
+  if(display_crc32)
+  {
+    if(has_crc32)
+    {
+      fprintf(stdout, "%8.8"PRIx32",", crc32);
+    }
+    else
+      fprintf(stdout, ",");
+  }
+
+  fprintf(stdout, "%s\n", found_in);
+}
+
+static void output(const char *required_by,
+ int board_num, int robot_num, int line_num, int x, int y,
+ const char *resource_path, const char *status, const char *found_in,
+ uint32_t crc32, boolean has_crc32)
+{
+  if(display_filename_only)
   {
     // Quiet mode- just print the resource paths
     fprintf(stdout, "%s\n", resource_path);
   }
-}
+  else
 
+  if(output_format_csv)
+  {
+    output_csv(required_by, board_num, robot_num, line_num, x, y, resource_path,
+     status, found_in, crc32, has_crc32);
+  }
+
+  else
+  {
+    output_preformatted(required_by, board_num, robot_num, line_num, x, y,
+     resource_path, status, found_in, crc32, has_crc32);
+  }
+}
 
 /*******************/
 /* Data processing */
@@ -758,18 +904,21 @@ struct base_path_file
 {
   char file_path[MAX_PATH];
   int file_path_len;
+  uint32_t hash;
+  uint32_t crc32;
+  boolean has_crc32;
   boolean used;
   boolean used_wildcard;
 };
 
-KHASH_SET_INIT(BASE_PATH_FILE, struct base_path_file *, file_path, file_path_len)
+HASH_SET_INIT(BASE_PATH_FILE, struct base_path_file *, file_path, file_path_len)
 
 struct base_path
 {
   char actual_path[MAX_PATH];
   char relative_path[MAX_PATH];
   struct zip_archive *zp;
-  khash_t(BASE_PATH_FILE) *file_list_table;
+  hash_t(BASE_PATH_FILE) *file_list_table;
 };
 
 struct base_file
@@ -787,19 +936,25 @@ struct resource
   int board_num;
   int robot_num;
   int line_num;
+  int x;
+  int y;
+  uint32_t hash;
   boolean is_wildcard;
   struct base_file *parent;
 };
 
-KHASH_SET_INIT(RESOURCE, struct resource *, path, key_len)
+HASH_SET_INIT(RESOURCE, struct resource *, path, key_len)
 
 // NULL is important
-static khash_t(RESOURCE) *requirement_table = NULL;
-static khash_t(RESOURCE) *resource_table = NULL;
+static hash_t(RESOURCE) *requirement_table = NULL;
+static hash_t(RESOURCE) *resource_table = NULL;
+
+static int16_t robot_xpos[256];
+static int16_t robot_ypos[256];
 
 static struct resource *add_requirement_ext(const char *src,
- struct base_file *file, int board_num, int robot_num, int line_num,
- boolean allow_expressions)
+ struct base_file *file, int board_num, int robot_num, int line_num, int x,
+ int y, boolean allow_expressions)
 {
   // A resource file required by a world/board.
   struct resource *req = NULL;
@@ -821,7 +976,7 @@ static struct resource *add_requirement_ext(const char *src,
   else
     join_path(temporary_buffer, file->relative_path, src);
 
-  strcpy_fsafe(fsafe_buffer, temporary_buffer);
+  strcpy_fsafe(fsafe_buffer, MAX_PATH, temporary_buffer);
   fsafe_len = strlen(fsafe_buffer);
 
   if(!display_first_only)
@@ -832,7 +987,7 @@ static struct resource *add_requirement_ext(const char *src,
     fsafe_len += 1 + strlen(fsafe_buffer + fsafe_len + 1);
   }
 
-  KHASH_FIND(RESOURCE, requirement_table, fsafe_buffer, fsafe_len, req);
+  HASH_FIND(RESOURCE, requirement_table, fsafe_buffer, fsafe_len, req);
 
   if(!req)
   {
@@ -845,6 +1000,8 @@ static struct resource *add_requirement_ext(const char *src,
     req->board_num = board_num;
     req->robot_num = robot_num;
     req->line_num = line_num;
+    req->x = x;
+    req->y = y;
     req->is_wildcard = is_wildcard;
     req->parent = file;
 
@@ -856,7 +1013,7 @@ static struct resource *add_requirement_ext(const char *src,
       resource_max_len = MAX(resource_max_len, req->path_len);
       parent_max_len = MAX(parent_max_len, (int)strlen(file->file_name));
     }
-    KHASH_ADD(RESOURCE, requirement_table, req);
+    HASH_ADD(RESOURCE, requirement_table, req);
   }
   return req;
 }
@@ -864,24 +1021,33 @@ static struct resource *add_requirement_ext(const char *src,
 static struct resource *add_requirement_sfx(const char *src,
  struct base_file *file, int board_num, int robot_num, int line_num)
 {
-  return add_requirement_ext(src, file, board_num, robot_num, line_num, false);
+  return add_requirement_ext(src, file, board_num, robot_num, line_num, -1, -1, false);
 }
 
 static struct resource *add_requirement_board(const char *src,
  struct base_file *file, int board_num, int resource_type)
 {
   if(board_num < 0 || resource_type >= 0) return NULL;
-  return add_requirement_ext(src, file, board_num, resource_type, -1, false);
+  return add_requirement_ext(src, file, board_num, resource_type, -1, -1, -1, false);
 }
 
 static struct resource *add_requirement_robot(const char *src,
  struct base_file *file, int board_num, int robot_num, int line_num)
 {
+  int x, y;
   if(robot_num < 0 || board_num < 0 ||
    (board_num == NO_BOARD && robot_num != GLOBAL_ROBOT))
     return NULL;
 
-  return add_requirement_ext(src, file, board_num, robot_num, line_num, true);
+  if(robot_num != GLOBAL_ROBOT)
+  {
+    x = robot_xpos[robot_num];
+    y = robot_ypos[robot_num];
+  }
+  else
+    x = y = -1;
+
+  return add_requirement_ext(src, file, board_num, robot_num, line_num, x, y, true);
 }
 
 static struct resource *add_resource(const char *src, struct base_file *file)
@@ -906,10 +1072,10 @@ static struct resource *add_resource(const char *src, struct base_file *file)
   else
     join_path(temporary_buffer, file->relative_path, src);
 
-  strcpy_fsafe(fsafe_buffer, temporary_buffer);
+  strcpy_fsafe(fsafe_buffer, MAX_PATH, temporary_buffer);
   fsafe_len = strlen(fsafe_buffer);
 
-  KHASH_FIND(RESOURCE, resource_table, fsafe_buffer, fsafe_len, res);
+  HASH_FIND(RESOURCE, resource_table, fsafe_buffer, fsafe_len, res);
 
   if(!res)
   {
@@ -921,6 +1087,8 @@ static struct resource *add_resource(const char *src, struct base_file *file)
     res->board_num = -1;
     res->robot_num = -1;
     res->line_num = -1;
+    res->x = -1;
+    res->y = -1;
     res->is_wildcard = is_wildcard;
     res->parent = NULL;
 
@@ -931,21 +1099,22 @@ static struct resource *add_resource(const char *src, struct base_file *file)
       resource_max_len = MAX(resource_max_len, fsafe_len);
       parent_max_len = MAX(parent_max_len, (int)strlen(file->file_name));
     }*/
-    KHASH_ADD(RESOURCE, resource_table, res);
+    HASH_ADD(RESOURCE, resource_table, res);
   }
 
   return res;
 }
 
 static void add_base_path_file(struct base_path *path,
- const char *file_name, size_t file_name_length)
+ const char *file_name, size_t file_name_length, uint32_t crc32,
+ boolean has_crc32)
 {
   struct base_path_file *entry;
 
   if(file_name_length >= MAX_PATH)
     file_name_length = MAX_PATH - 1;
 
-  KHASH_FIND(BASE_PATH_FILE, path->file_list_table, file_name, file_name_length,
+  HASH_FIND(BASE_PATH_FILE, path->file_list_table, file_name, file_name_length,
     entry);
 
   if(!entry)
@@ -955,10 +1124,12 @@ static void add_base_path_file(struct base_path *path,
     memcpy(entry->file_path, file_name, file_name_length);
     entry->file_path[file_name_length] = '\0';
     entry->file_path_len = file_name_length;
+    entry->crc32 = crc32;
+    entry->has_crc32 = has_crc32;
     entry->used = false;
     entry->used_wildcard = false;
 
-    KHASH_ADD(BASE_PATH_FILE, path->file_list_table, entry);
+    HASH_ADD(BASE_PATH_FILE, path->file_list_table, entry);
 
     if(display_unused || display_wildcard)
       resource_max_len = MAX(resource_max_len, (int)file_name_length);
@@ -968,7 +1139,8 @@ static void add_base_path_file(struct base_path *path,
 static void add_base_path_file_wr(void *path, const char *file_name,
  size_t file_name_length)
 {
-  add_base_path_file((struct base_path *)path, file_name, file_name_length);
+  add_base_path_file((struct base_path *)path, file_name, file_name_length,
+   0, false);
 }
 
 static void build_zip_base_path_table(struct base_path *path,
@@ -982,15 +1154,17 @@ static void build_zip_base_path_table(struct base_path *path,
   for(i = 0; i < num_files; i++)
   {
     fh = files[i];
-    add_base_path_file(path, fh->file_name, fh->file_name_length);
+    add_base_path_file(path, fh->file_name, fh->file_name_length,
+     fh->crc32, true);
   }
+  table_has_crc32 = true;
 }
 
 static void change_base_path_dir(struct base_path *current_path,
  const char *new_relative_path)
 {
   size_t len;
-  fsafetranslate(new_relative_path, current_path->relative_path);
+  fsafetranslate(new_relative_path, current_path->relative_path, MAX_PATH);
 
   len = strlen(current_path->relative_path);
   if(current_path->relative_path[len - 1] != '/' && len < MAX_PATH - 1)
@@ -1003,15 +1177,21 @@ static void change_base_path_dir(struct base_path *current_path,
 static struct base_path *add_base_path(const char *path_name,
  struct base_path ***path_list, int *path_list_size, int *path_list_alloc)
 {
-  struct base_path *new_path = ccalloc(1, sizeof(struct base_path));
+  struct stat st;
+  struct base_path *new_path;
   int alloc = *path_list_alloc;
   int size = *path_list_size;
 
   size_t path_name_len = strlen(path_name);
-  const char *ext = path_name_len >= 4 ? path_name + path_name_len - 4 : NULL;
 
-  if(ext && !strcasecmp(ext, ".ZIP"))
+  if(vstat(path_name, &st))
+    return NULL;
+
+  new_path = ccalloc(1, sizeof(struct base_path));
+
+  if(S_ISREG(st.st_mode))
   {
+    // Attempt to open the path as a zip archive.
     struct zip_archive *zp = zip_open_file_read(path_name);
 
     if(!zp)
@@ -1024,13 +1204,21 @@ static struct base_path *add_base_path(const char *path_name,
     new_path->zp = zp;
   }
   else
+
+  if(S_ISDIR(st.st_mode))
   {
+    // Attempt to recursively build a file list of this directory's contents.
     if(!path_search(path_name, path_name_len, MAX_PATH_DEPTH,
      (void *)new_path, add_base_path_file_wr))
     {
       free(new_path);
       return NULL;
     }
+  }
+  else
+  {
+    free(new_path);
+    return NULL;
   }
 
   snprintf(new_path->actual_path, MAX_PATH, "%s", path_name);
@@ -1043,7 +1231,7 @@ static struct base_path *add_base_path(const char *path_name,
       alloc = 4;
     }
 
-    *path_list = realloc(*path_list, 2 * alloc * sizeof(struct base_path *));
+    *path_list = crealloc(*path_list, 2 * alloc * sizeof(struct base_path *));
     *path_list_alloc *= 2;
   }
 
@@ -1070,7 +1258,7 @@ static struct base_file *add_base_file(const char *path_name,
       alloc = 4;
     }
 
-    *file_list = realloc(*file_list, 2 * alloc * sizeof(struct base_file *));
+    *file_list = crealloc(*file_list, 2 * alloc * sizeof(struct base_file *));
     *file_list_alloc *= 2;
   }
 
@@ -1159,6 +1347,8 @@ static void process_requirements(struct base_path **path_list,
   char *translated_path;
   size_t len;
   boolean found;
+  boolean found_has_crc32;
+  uint32_t found_crc32;
   size_t i;
   int j;
 
@@ -1187,7 +1377,7 @@ static void process_requirements(struct base_path **path_list,
   // Build a list of the requirements from the hash table and sort it.
   // This is entirely for the purpose of having more useful output.
   i = 0;
-  KHASH_ITER(RESOURCE, requirement_table, req,
+  HASH_ITER(RESOURCE, requirement_table, req,
   {
     req_sorted[i++] = req;
   });
@@ -1198,6 +1388,8 @@ static void process_requirements(struct base_path **path_list,
   {
     req = req_sorted[i];
     found = false;
+    found_crc32 = 0;
+    found_has_crc32 = false;
 
     for(j = 0; j < path_list_size; j++)
     {
@@ -1214,7 +1406,7 @@ static void process_requirements(struct base_path **path_list,
       {
         if(req->is_wildcard)
         {
-          KHASH_ITER(BASE_PATH_FILE, current_path->file_list_table, bpf,
+          HASH_ITER(BASE_PATH_FILE, current_path->file_list_table, bpf,
           {
             if(check_wildcard_path(bpf->file_path, translated_path))
             {
@@ -1236,13 +1428,15 @@ static void process_requirements(struct base_path **path_list,
         }
 
         // Normal resource: try to find the file in the base path's hash table
-        KHASH_FIND(BASE_PATH_FILE, current_path->file_list_table,
+        HASH_FIND(BASE_PATH_FILE, current_path->file_list_table,
          translated_path, strlen(translated_path), bpf);
 
         if(bpf)
         {
           bpf->used = true;
           found = true;
+          found_crc32 = bpf->crc32;
+          found_has_crc32 = bpf->has_crc32;
           break;
         }
       }
@@ -1252,7 +1446,7 @@ static void process_requirements(struct base_path **path_list,
         // Try to find an actual file
         join_path(path_buffer, current_path->actual_path, translated_path);
 
-        if(!stat(path_buffer, &stat_info))
+        if(!vstat(path_buffer, &stat_info))
         {
           found = true;
           break;
@@ -1264,7 +1458,8 @@ static void process_requirements(struct base_path **path_list,
     {
       if(display_wildcard)
         output(req->parent->file_name, req->board_num, req->robot_num,
-         req->line_num, req->path, pattern_append, current_path->actual_path);
+         req->line_num, req->x, req->y, req->path, pattern_append,
+         current_path->actual_path, 0, false);
     }
     else
 
@@ -1272,17 +1467,18 @@ static void process_requirements(struct base_path **path_list,
     {
       if(display_found)
         output(req->parent->file_name, req->board_num, req->robot_num,
-         req->line_num, req->path, found_append, current_path->actual_path);
+         req->line_num, req->x, req->y, req->path, found_append,
+         current_path->actual_path, found_crc32, found_has_crc32);
     }
     else
     {
       // Try to find in the created resources table
-      KHASH_FIND(RESOURCE, resource_table, req->path, req->path_len, res);
+      HASH_FIND(RESOURCE, resource_table, req->path, req->path_len, res);
 
       if(!res && resource_table)
       {
         // There might be wildcard created resources...
-        KHASH_ITER(RESOURCE, resource_table, res,
+        HASH_ITER(RESOURCE, resource_table, res,
         {
           if(check_wildcard_path(req->path, res->path))
             break;
@@ -1297,13 +1493,14 @@ static void process_requirements(struct base_path **path_list,
 
         if(display_created)
           output(req->parent->file_name, req->board_num, req->robot_num,
-           req->line_num, req->path, append, NULL);
+           req->line_num, req->x, req->y, req->path, append, NULL, 0, false);
       }
       else
       {
         if(display_not_found)
           output(req->parent->file_name, req->board_num, req->robot_num,
-           req->line_num, req->path, not_found_append, NULL);
+           req->line_num, req->x, req->y, req->path, not_found_append, NULL, 0,
+           false);
       }
     }
   }
@@ -1332,7 +1529,7 @@ static void process_requirements(struct base_path **path_list,
         {
           size_t k;
           i = 0;
-          KHASH_ITER(BASE_PATH_FILE, current_path->file_list_table, bpf,
+          HASH_ITER(BASE_PATH_FILE, current_path->file_list_table, bpf,
           {
             if(!bpf->used)
               bpf_sorted[i++] = bpf;
@@ -1366,15 +1563,15 @@ static void process_requirements(struct base_path **path_list,
 
             if(display_unused && !bpf->used_wildcard)
             {
-              output("", DONT_PRINT, -1, -1, file_path, unused_append,
-               current_path->actual_path);
+              output("", DONT_PRINT, -1, -1, -1, -1, file_path, unused_append,
+               current_path->actual_path, bpf->crc32, bpf->has_crc32);
             }
             else
 
             if(display_wildcard && bpf->used_wildcard)
             {
-              output("", DONT_PRINT, -1, -1, file_path, maybe_used_append,
-               current_path->actual_path);
+              output("", DONT_PRINT, -1, -1, -1, -1, file_path, maybe_used_append,
+               current_path->actual_path, bpf->crc32, bpf->has_crc32);
             }
           }
         }
@@ -1397,30 +1594,30 @@ static void clear_data(struct base_path **path_list,
   struct base_path_file *fp;
   int i;
 
-  KHASH_ITER(RESOURCE, requirement_table, res,
+  HASH_ITER(RESOURCE, requirement_table, res,
   {
-    KHASH_DELETE(RESOURCE, requirement_table, res);
+    HASH_DELETE(RESOURCE, requirement_table, res);
     free(res);
   });
-  KHASH_CLEAR(RESOURCE, requirement_table);
+  HASH_CLEAR(RESOURCE, requirement_table);
 
-  KHASH_ITER(RESOURCE, resource_table, res,
+  HASH_ITER(RESOURCE, resource_table, res,
   {
-    KHASH_DELETE(RESOURCE, resource_table, res);
+    HASH_DELETE(RESOURCE, resource_table, res);
     free(res);
   });
-  KHASH_CLEAR(RESOURCE, resource_table);
+  HASH_CLEAR(RESOURCE, resource_table);
 
   for(i = 0; i < path_list_size; i++)
   {
     bp = path_list[i];
 
-    KHASH_ITER(BASE_PATH_FILE, bp->file_list_table, fp,
+    HASH_ITER(BASE_PATH_FILE, bp->file_list_table, fp,
     {
-      KHASH_DELETE(BASE_PATH_FILE, bp->file_list_table, fp);
+      HASH_DELETE(BASE_PATH_FILE, bp->file_list_table, fp);
       free(fp);
     });
-    KHASH_CLEAR(BASE_PATH_FILE, bp->file_list_table);
+    HASH_CLEAR(BASE_PATH_FILE, bp->file_list_table);
 
     if(bp->zp)
       zip_close(bp->zp, NULL);
@@ -1509,7 +1706,7 @@ static enum status parse_sfx(char *sfx_buf, struct base_file *file,
     *start = 0;
     *end = 0;
 
-    debug("SFX (class): %s\n", start + 1);
+    trace("SFX (class): %s\n", start + 1);
     add_requirement_sfx(start + 1, file, board_num, robot_num, line_num);
   }
 
@@ -1520,7 +1717,7 @@ static enum status parse_sfx(char *sfx_buf, struct base_file *file,
  (fn_len == sizeof(s)-1) && (!strcasecmp(function_counter, s)))
 
 #define match_partial(s, reqv) ((world_version >= reqv) && \
- (fn_len >= sizeof(s)-1) && (!strncasecmp(function_counter, s, fn_len)))
+ (fn_len >= sizeof(s)-1) && (!strncasecmp(function_counter, s, sizeof(s)-1)))
 
 #define TERMINATE(s,slen) \
  do{ if(slen && s[slen - 1] == '\0') slen--; else s[slen]='\0'; }while(0)
@@ -1607,7 +1804,7 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
          || match_partial("LOAD_BC", V270)
          || match_partial("LOAD_ROBOT", V270))
         {
-          debug("SET: %s (%s)\n", src, function_counter);
+          trace("SET: %s (%s)\n", src, function_counter);
           add_requirement_robot(src, file, board_num, robot_num, line_num);
           break;
         }
@@ -1620,7 +1817,7 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
          || match_partial("SAVE_BC", V270)
          || match_partial("SAVE_ROBOT", V270))
         {
-          debug("SET: %s (%s)\n", src, function_counter);
+          trace("SET: %s (%s)\n", src, function_counter);
           add_resource(src, file);
           break;
         }
@@ -1630,7 +1827,7 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
           // Maximum version
           if(world_version < V290)
           {
-            debug("SET: %s (%s)\n", src, function_counter);
+            trace("SET: %s (%s)\n", src, function_counter);
             add_resource(src, file);
           }
           break;
@@ -1660,7 +1857,7 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
         if(src[src_len - 1] == '*')
           src[src_len - 1] = 0;
 
-        debug("MOD: %s\n", src);
+        trace("MOD: %s\n", src);
         add_requirement_robot(src, file, board_num, robot_num, line_num);
         break;
       }
@@ -1686,7 +1883,7 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
         // Don't trust null termination from data read in
         TERMINATE(src, src_len);
 
-        debug("SAM: %s\n", src);
+        trace("SAM: %s\n", src);
         add_requirement_robot(src, file, board_num, robot_num, line_num);
         break;
       }
@@ -1734,7 +1931,7 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
           {
             if(mfgetw(mf) == IMAGE_FILE && src[0] == '@')
             {
-              debug("PUT @file: %s\n", src + 1);
+              trace("PUT @file: %s\n", src + 1);
               add_requirement_robot(src + 1, file, board_num, robot_num,
                line_num);
             }
@@ -1788,7 +1985,7 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
         if(src[src_len - 1] == '*')
           src[src_len - 1] = 0;
 
-        debug("MOD FADE IN: %s\n", src);
+        trace("MOD FADE IN: %s\n", src);
         add_requirement_robot(src, file, board_num, robot_num, line_num);
         break;
       }
@@ -1825,7 +2022,7 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
 
           if(src[0] == '@')
           {
-            debug("COPY BLOCK @file: %s\n", src + 1);
+            trace("COPY BLOCK @file: %s\n", src + 1);
             add_resource(src + 1, file);
           }
         }
@@ -1857,14 +2054,27 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
 
         if(src[0] == '+')
         {
-          char tempc = src[3];
+          if(src[1] == '&')
+          {
+            rest = skip_interpolation(src + 1);
+          }
+          else
 
-          src[3] = 0;
-          strtol(src + 1, (char **)(&rest), 16);
-          src[3] = tempc;
+          if(src[1] == '(')
+          {
+            rest = skip_expression(src + 1);
+          }
+          else
+          {
+            char tempc = src[3];
+            src[3] = 0;
+            strtol(src + 1, (char **)(&rest), 16);
+            src[3] = tempc;
+          }
         }
+        else
 
-        else if(src[0] == '@')
+        if(src[0] == '@')
         {
           char tempc;
           int maxlen;
@@ -1896,7 +2106,7 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
             rest = src;
         }
 
-        debug("LOAD CHAR SET: %s\n", rest);
+        trace("LOAD CHAR SET: %s\n", rest);
         add_requirement_robot(rest, file, board_num, robot_num, line_num);
         break;
       }
@@ -1914,7 +2124,7 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
         // Don't trust null termination from data read in
         TERMINATE(src, src_len);
 
-        debug("LOAD PALETTE: %s\n", src);
+        trace("LOAD PALETTE: %s\n", src);
         add_requirement_robot(src, file, board_num, robot_num, line_num);
         break;
       }
@@ -1932,7 +2142,7 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
         // Don't trust null termination from data read in
         TERMINATE(src, src_len);
 
-        debug("SWAP WORLD: %s\n", src);
+        trace("SWAP WORLD: %s\n", src);
         add_requirement_robot(src, file, board_num, robot_num, line_num);
         break;
       }
@@ -1966,6 +2176,98 @@ static enum status parse_legacy_bytecode(struct memfile *mf,
 /* Legacy Worlds */
 /*****************/
 
+#define MAX_PASSWORD_LENGTH 15
+
+// From legacy_world.c
+static uint8_t get_pw_xor_code(char *password, int pro_method)
+{
+  static const char magic_code[16] =
+   "\xE6\x52\xEB\xF2\x6D\x4D\x4A\xB7\x87\xB2\x92\x88\xDE\x91\x24";
+
+  int work = 85; // Start with 85... (01010101)
+  size_t i;
+
+  // First, normalize password...
+  for(i = 0; i < MAX_PASSWORD_LENGTH; i++)
+  {
+    password[i] ^= magic_code[i];
+    password[i] -= 0x12 + pro_method;
+    password[i] ^= 0x8D;
+  }
+
+  // Clear pw after first null
+  for(i = strlen(password); i < MAX_PASSWORD_LENGTH; i++)
+  {
+    password[i] = 0;
+  }
+
+  for(i = 0; i < MAX_PASSWORD_LENGTH; i++)
+  {
+    //For each byte, roll once to the left and xor in pw byte if it
+    //is an odd character, or add in pw byte if it is an even character.
+    work <<= 1;
+    if(work > 255)
+      work ^= 257; // Wraparound from roll
+
+    if(i & 1)
+    {
+      work += (signed char)password[i]; // Add (even byte)
+      if(work > 255)
+        work ^= 257; // Wraparound from add
+    }
+    else
+    {
+      work ^= (signed char)password[i]; // XOR (odd byte);
+    }
+  }
+  // To factor in protection method, add it in and roll one last time
+  work += pro_method;
+  if(work > 255)
+    work ^= 257;
+
+  work <<= 1;
+  if(work > 255)
+    work ^= 257;
+
+  // Can't be 0-
+  if(work == 0)
+    work = 86; // (01010110)
+  // Done!
+  return work;
+}
+
+#if ARCHITECTURE_BITS == 64
+#define ALIGN_TYPE uint64_t
+#define ALIGN_XOR(x) ((x) | (x << 8) | (x << 16) | (x << 24) | \
+ (x << 32) | (x << 40) | (x << 48) | (x << 56))
+#else
+#define ALIGN_TYPE uint32_t
+#define ALIGN_XOR(x) ((x) | (x << 8) | (x << 16) | (x << 24))
+#endif
+
+static void _decrypt_legacy_world(struct memfile *mf, char *password,
+ int protection_method)
+{
+  ALIGN_TYPE xor = get_pw_xor_code(password, protection_method);
+  ALIGN_TYPE xor_w = ALIGN_XOR(xor);
+  unsigned char *pos = mf->current;
+
+  fprintf(stderr, "xor=%u, password: %s\n", (unsigned int)xor, password);
+  fflush(stderr);
+
+  while(pos < mf->end && ((size_t)pos) % sizeof(ALIGN_TYPE))
+    *(pos++) ^= xor;
+
+  while(mf->end - pos >= (ptrdiff_t)sizeof(ALIGN_TYPE))
+  {
+    *((ALIGN_TYPE *)pos) ^= xor_w;
+    pos += sizeof(ALIGN_TYPE);
+  }
+
+  while(pos < mf->end)
+    *(pos++) ^= xor;
+}
+
 static enum status parse_legacy_robot(struct memfile *mf,
  struct base_file *file, int board_num, int robot_num)
 {
@@ -1973,6 +2275,7 @@ static enum status parse_legacy_robot(struct memfile *mf,
   struct memfile prog;
 
   enum status ret = SUCCESS;
+  boolean used = false;
 
   // program_length (2),
   program_size = mfgetw(mf);
@@ -1981,15 +2284,32 @@ static enum status parse_legacy_robot(struct memfile *mf,
   // cur_prog_line (2), pos_within_line (1), robot_cycle (1), cycle_count (1),
   // bullet_type (1), is_locked (1), can_lavawalk (1), walk_dir (1),
   // last_touch_dir (1), last_shot_dir (1), xpos (2), ypos (2),
-  // status (1), blank (2), used (1), loop_count (2),
-  if(mfseek(mf, 41 - 2, SEEK_CUR) != 0)
+  // status (1), legacy local1 (2),
+  if(mfseek(mf, 41 - 5, SEEK_CUR) != 0)
     return FSEEK_FAILED;
 
-  if(program_size)
+  // used (1),
+  used = !!mfgetc(mf);
+
+  // legacy loop_count (2),
+  if(mfseek(mf, 2, SEEK_CUR) != 0)
+    return FSEEK_FAILED;
+
+  // VER1TO2 worlds (e.g. Forest, Catacombs) sometimes have invalid programs
+  // of size 2. It's safe to just ignore anything of size 2 or less.
+  if(program_size > 2)
   {
     mfopen(mf->current, program_size, &prog);
 
     ret = parse_legacy_bytecode(&prog, program_size, file, board_num, robot_num);
+
+    // Ignore errors on unused robots since these don't really matter.
+    // This includes the global robots in Slave Pit and Wes.
+    if(ret && !used)
+    {
+      warnhere("Unused robot with corruption detected (this is safe to ignore).\n");
+      ret = SUCCESS;
+    }
   }
 
   mfseek(mf, program_size, SEEK_CUR);
@@ -2167,7 +2487,7 @@ static enum status parse_legacy_board(struct memfile *mf,
   // check the board MOD exists
   if(strlen(board_mod) > 0 && strcmp(board_mod, "*"))
   {
-    debug("BOARD MOD: %s\n", board_mod);
+    trace("BOARD MOD: %s\n", board_mod);
     add_requirement_board(board_mod, file, board_num, IS_BOARD_MOD);
   }
 
@@ -2190,7 +2510,7 @@ static enum status parse_legacy_board(struct memfile *mf,
     ret = parse_legacy_robot(mf, file, board_num, i + 1);
     if(ret != SUCCESS)
     {
-      warnhere("Failed processing robot %d\n", i + 1);
+      warnhere("Error processing robot %d\n", i + 1);
       break;
     }
   }
@@ -2204,7 +2524,7 @@ struct legacy_board {
 };
 
 static enum status parse_legacy_world(struct memfile *mf,
- struct base_file *file)
+ struct base_file *file, int protection_method)
 {
   int global_robot_offset;
   struct legacy_board board_list[MAX_BOARDS];
@@ -2219,6 +2539,9 @@ static enum status parse_legacy_world(struct memfile *mf,
     warnhere("couldn't seek to global robot position (truncated)\n");
     return CORRUPT_WORLD;
   }
+  // Protected worlds: everything is offset 15 bytes.
+  if(protection_method)
+    mfseek(mf, MAX_PASSWORD_LENGTH, SEEK_CUR);
 
   // Absolute offset (in bytes) of global robot
   global_robot_offset = mfgetd(mf);
@@ -2233,7 +2556,7 @@ static enum status parse_legacy_world(struct memfile *mf,
     char sfx_buf[LEGACY_SFX_SIZE + 1];
     int sfx_len;
 
-    debug("SFX table (input length: %d)\n", sfx_len_total);
+    trace("SFX table (input length: %d)\n", sfx_len_total);
 
     for(i = 0; i < NUM_SFX; i++)
     {
@@ -2295,7 +2618,7 @@ static enum status parse_legacy_world(struct memfile *mf,
   {
     struct legacy_board *board = &board_list[i];
 
-    debug("Board %d\n", i);
+    trace("Board %d\n", i);
 
     // don't care about deleted boards
     if(board->size == 0)
@@ -2305,19 +2628,19 @@ static enum status parse_legacy_world(struct memfile *mf,
     if(mfseek(mf, board->offset, SEEK_SET) != 0)
     {
       warnhere("Failed to seek to position of board %d\n", i);
-      return CORRUPT_WORLD;
+      continue;
     }
 
     // parse this board atomically
     ret = parse_legacy_board(mf, file, i);
     if(ret != SUCCESS)
     {
-      warnhere("Failed processing board %d\n", i);
-      goto err_out;
+      warnhere("Error processing board %d\n", i);
+      continue;
     }
   }
 
-  debug("Global robot\n");
+  trace("Global robot\n");
 
   // Do the global robot too..
   if(mfseek(mf, global_robot_offset, SEEK_SET) != 0)
@@ -2330,7 +2653,6 @@ static enum status parse_legacy_world(struct memfile *mf,
   if(ret != SUCCESS)
     warnhere("Failed processing global robot\n");
 
-err_out:
   return ret;
 }
 
@@ -2390,7 +2712,7 @@ static enum status parse_board_info(struct memfile *mf, struct base_file *file,
           mfread(buffer, len, 1, &prop);
           buffer[len] = 0;
 
-          debug("BOARD MOD: %s\n", buffer);
+          trace("BOARD MOD: %s\n", buffer);
           add_requirement_board(buffer, file, board_num, IS_BOARD_MOD);
         }
         break;
@@ -2403,7 +2725,7 @@ static enum status parse_board_info(struct memfile *mf, struct base_file *file,
           mfread(buffer, len, 1, &prop);
           buffer[len] = 0;
 
-          debug("BOARD CHR/PAL: %s\n", buffer);
+          trace("BOARD CHR/PAL: %s\n", buffer);
           add_requirement_board(buffer, file, board_num,
            (ident == BPROP_CHARSET_PATH) ? IS_BOARD_CHARSET : IS_BOARD_PALETTE);
         }
@@ -2422,7 +2744,7 @@ static enum status parse_sfx_file(struct memfile *mf, struct base_file *file)
 
   enum status ret = SUCCESS;
 
-  debug("SFX table found\n");
+  trace("SFX table found\n");
 
   for(i = 0; i < NUM_SFX; i++)
   {
@@ -2440,7 +2762,7 @@ static enum status parse_sfx_file(struct memfile *mf, struct base_file *file)
 }
 
 static enum status parse_world(struct memfile *mf, struct base_file *file,
- int not_a_world)
+ boolean is_a_world)
 {
   struct zip_archive *zp = zip_open_mem_read(mf->start,
    mf->end - mf->start);
@@ -2461,16 +2783,16 @@ static enum status parse_world(struct memfile *mf, struct base_file *file,
     goto err_close;
   }
 
-  assign_fprops(zp, not_a_world);
+  world_assign_file_ids(zp, is_a_world);
 
-  while(ZIP_SUCCESS == zip_get_next_prop(zp, &file_id, &board_id, &robot_id))
+  while(ZIP_SUCCESS == zip_get_next_mzx_file_id(zp, &file_id, &board_id, &robot_id))
   {
     switch(file_id)
     {
-      case FPROP_WORLD_GLOBAL_ROBOT:
-      case FPROP_BOARD_INFO:
-      case FPROP_ROBOT:
-      case FPROP_WORLD_SFX:
+      case FILE_ID_WORLD_GLOBAL_ROBOT:
+      case FILE_ID_BOARD_INFO:
+      case FILE_ID_ROBOT:
+      case FILE_ID_WORLD_SFX:
       {
         zip_get_next_uncompressed_size(zp, &actual_size);
         if(allocated_size < actual_size)
@@ -2482,29 +2804,29 @@ static enum status parse_world(struct memfile *mf, struct base_file *file,
         zip_read_file(zp, buffer, actual_size, &actual_size);
         mfopen(buffer, actual_size, &buf_file);
 
-        if(file_id == FPROP_BOARD_INFO)
+        if(file_id == FILE_ID_BOARD_INFO)
         {
-          debug("Board %u\n", board_id);
+          trace("Board %u\n", board_id);
           ret = parse_board_info(&buf_file, file, (int)board_id);
         }
         else
 
-        if(file_id == FPROP_ROBOT)
+        if(file_id == FILE_ID_ROBOT)
         {
           ret = parse_robot_info(&buf_file, file, (int)board_id, (int)robot_id);
         }
         else
 
-        if(file_id == FPROP_WORLD_GLOBAL_ROBOT)
+        if(file_id == FILE_ID_WORLD_GLOBAL_ROBOT)
         {
-          debug("Global robot\n");
+          trace("Global robot\n");
           ret = parse_robot_info(&buf_file, file, NO_BOARD, GLOBAL_ROBOT);
         }
         else
 
-        if(file_id == FPROP_WORLD_SFX)
+        if(file_id == FILE_ID_WORLD_SFX)
         {
-          debug("SFX table\n");
+          trace("SFX table\n");
           ret = parse_sfx_file(&buf_file, file);
         }
 
@@ -2553,23 +2875,57 @@ static enum status parse_board_file(struct memfile *mf, struct base_file *file)
     return parse_legacy_board(mf, file, -1);
 
   if(file_version <= MZX_VERSION)
-    return parse_world(mf, file, 1);
+    return parse_world(mf, file, false);
 
   return MAGIC_CHECK_FAILED;
 }
 
 static enum status parse_world_file(struct memfile *mf, struct base_file *file)
 {
-  unsigned char magic[3];
+  unsigned char magic[4];
+  int protection_method;
   int file_version;
+
+  // Truncation safety check.
+  if(!mfhasspace(64, mf))
+    return FREAD_FAILED;
 
   // skip to protected byte; don't care about world name
   if(mfseek(mf, LEGACY_WORLD_PROTECTED_OFFSET, SEEK_SET) != 0)
     return FSEEK_FAILED;
 
-  // can't yet support protected worlds
-  if(mfgetc(mf) != 0)
-    return PROTECTED_WORLD;
+  protection_method = mfgetc(mf);
+  if(protection_method != 0)
+  {
+    // World is probably protected (or possibly junk).
+    char password[16];
+    long magic_pos;
+
+    if(protection_method < 0 || protection_method > 3)
+      return MAGIC_CHECK_FAILED;
+
+    if(mfread(password, 1, MAX_PASSWORD_LENGTH, mf) != MAX_PASSWORD_LENGTH)
+      return FREAD_FAILED;
+    password[MAX_PASSWORD_LENGTH] = '\0';
+
+    magic_pos = mftell(mf);
+    if(mfread(magic, 1, 4, mf) != 4)
+      return FREAD_FAILED;
+
+    file_version = _world_magic(magic);
+    if(file_version <= 0)
+    {
+      // 1.xx world magic is located one byte further in the file.
+      file_version = _world_magic(magic + 1);
+      if(file_version != V100)
+        return MAGIC_CHECK_FAILED;
+
+      return MZX_100_NOT_SUPPORTED;
+    }
+    mfseek(mf, magic_pos + 3, SEEK_SET);
+    _decrypt_legacy_world(mf, password, protection_method);
+    mfseek(mf, magic_pos, SEEK_SET);
+  }
 
   // read in world magic (version)
   if(mfread(magic, 1, 3, mf) != 3)
@@ -2580,27 +2936,27 @@ static enum status parse_world_file(struct memfile *mf, struct base_file *file)
   if(file_version <= 0)
     return MAGIC_CHECK_FAILED;
 
+  if(file_version < V200)
+    return MZX_100_NOT_SUPPORTED;
+
   file->world_version = file_version;
 
   if(file_version <= MZX_LEGACY_FORMAT_VERSION)
-    return parse_legacy_world(mf, file);
+    return parse_legacy_world(mf, file, protection_method);
 
   if(file_version <= MZX_VERSION)
-    return parse_world(mf, file, 0);
+    return parse_world(mf, file, true);
 
   return MAGIC_CHECK_FAILED;
 }
 
-static char *load_file(FILE *fp, size_t *buf_size)
+static char *load_file(vfile *vf, size_t *buf_size)
 {
   char *buffer;
-
-  fseek(fp, 0, SEEK_END);
-  *buf_size = ftell(fp);
-  rewind(fp);
+  *buf_size = vfilelength(vf, true);
 
   buffer = cmalloc(*buf_size);
-  *buf_size = fread(buffer, 1, *buf_size, fp);
+  *buf_size = vfread(buffer, 1, *buf_size, vf);
 
   return buffer;
 }
@@ -2609,6 +2965,7 @@ static enum status parse_file(const char *file_name,
  struct base_path **path_list, int path_list_size)
 {
   char file_dir[MAX_PATH];
+  struct stat stat_info;
 
   int path_list_alloc = path_list_size;
 
@@ -2623,21 +2980,22 @@ static enum status parse_file(const char *file_name,
   struct memfile mf;
   char *buffer = NULL;
   size_t buf_size;
-  FILE *fp;
+  vfile *vf;
   int i;
 
   enum status ret = SUCCESS;
 
-  fp = fopen_unsafe(file_name, "rb");
+  vf = vfopen_unsafe(file_name, "rb");
   len = strlen(file_name);
   ext = len >= 4 ? (char *)file_name + len - 4 : NULL;
 
-  _get_path(file_dir, file_name);
+  if(!_get_path(file_dir, file_name))
+    strcpy(file_dir, ".");
 
-  if(fp && ext && !strcasecmp(ext, ".MZX"))
+  if(vf && ext && !strcasecmp(ext, ".MZX"))
   {
-    buffer = load_file(fp, &buf_size);
-    fclose(fp);
+    buffer = load_file(vf, &buf_size);
+    vfclose(vf);
 
     // Add the containing directory as a base path
     add_base_path(file_dir, &path_list, &path_list_size, &path_list_alloc);
@@ -2651,10 +3009,10 @@ static enum status parse_file(const char *file_name,
   }
   else
 
-  if(fp && ext && !strcasecmp(ext, ".MZB"))
+  if(vf && ext && !strcasecmp(ext, ".MZB"))
   {
-    buffer = load_file(fp, &buf_size);
-    fclose(fp);
+    buffer = load_file(vf, &buf_size);
+    vfclose(vf);
 
     // Add the containing directory as a base path
     add_base_path(file_dir, &path_list, &path_list_size, &path_list_alloc);
@@ -2668,15 +3026,16 @@ static enum status parse_file(const char *file_name,
   }
   else
 
-  if(fp && ext && !strcasecmp(ext, ".ZIP"))
+  if(vf && !vstat(file_name, &stat_info) && S_ISREG(stat_info.st_mode))
   {
+    // Is a file but isn't an .mzx or an .mzb? Try to read it as a zip...
     struct base_path *zip_base;
     struct zip_archive *zp;
 
     size_t actual_size;
     char name_buffer[MAX_PATH];
 
-    fclose(fp);
+    vfclose(vf);
 
     // Add the zip as a base path
     // This will open the zip and read its directory
@@ -2684,8 +3043,8 @@ static enum status parse_file(const char *file_name,
     zip_base = add_base_path(file_name, &path_list,
      &path_list_size, &path_list_alloc);
 
-    if(!zip_base)
-      return ZIP_FAILED;
+    if(!zip_base || !zip_base->zp)
+      goto error;
 
     zp = zip_base->zp;
 
@@ -2702,7 +3061,7 @@ static enum status parse_file(const char *file_name,
         buffer = ccalloc(1, actual_size);
         if(ZIP_SUCCESS != zip_read_file(zp, buffer, actual_size, &actual_size))
         {
-          warn("Error processing '%s': %s\n\n", name_buffer,
+          warnhere("Error processing '%s': %s\n\n", name_buffer,
            decode_status(ZIP_FAILED));
           free(buffer);
           continue;
@@ -2724,7 +3083,7 @@ static enum status parse_file(const char *file_name,
         if(ret != SUCCESS)
         {
           // Keep going; other files in the archive may not be corrupt.
-          warn("Error processing '%s': %s\n\n", name_buffer, decode_status(ret));
+          warnhere("Error processing '%s': %s\n\n", name_buffer, decode_status(ret));
           ret = SUCCESS;
         }
         free(buffer);
@@ -2748,7 +3107,7 @@ static enum status parse_file(const char *file_name,
      &path_list_size, &path_list_alloc);
     char name_buffer[MAX_PATH];
 
-    if(fp) fclose(fp);
+    if(vf) vfclose(vf);
     if(!dir_base)
       return DIRENT_FAILED;
 
@@ -2757,16 +3116,16 @@ static enum status parse_file(const char *file_name,
       current_file = file_list[i];
       join_path(name_buffer, file_name, current_file->file_name);
 
-      fp = fopen_unsafe(name_buffer, "rb");
+      vf = vfopen_unsafe(name_buffer, "rb");
       len = strlen(current_file->file_name);
       ext = len >= 4 ? current_file->file_name + len - 4 : NULL;
-      if(fp)
+      if(vf)
       {
         // NOTE: the relative paths of these are automatically added in
         // add_base_files_from_path. The base file itself doesn't need a
         // relative path because it's being created as the cwd.
-        buffer = load_file(fp, &buf_size);
-        fclose(fp);
+        buffer = load_file(vf, &buf_size);
+        vfclose(vf);
 
         mfopen(buffer, buf_size, &mf);
 
@@ -2782,22 +3141,22 @@ static enum status parse_file(const char *file_name,
         if(ret != SUCCESS)
         {
           // Keep going; other files in the path may not be corrupt.
-          warn("Error processing '%s': %s\n", current_file->file_name,
+          warnhere("Error processing '%s': %s\n", current_file->file_name,
            decode_status(ret));
           ret = SUCCESS;
         }
       }
       else
-        warn("Failed to open '%s' for reading\n", current_file->file_name);
+        warnhere("Failed to open '%s' for reading\n", current_file->file_name);
     }
   }
 
   else
   {
-    if(fp) fclose(fp);
+error:
     fprintf(stderr,
-      "'%s' is not a .MZX (world), .MZB (board),"
-      "directory containing .MZX/.MZB files, or .ZIP (archive) file.\n",
+      "'%s' is not a .MZX (world), a .MZB (board), "
+      "a directory containing .MZX/.MZB files, or a ZIP archive.\n",
       file_name
     );
     return INVALID_ARGUMENTS;
@@ -2808,7 +3167,7 @@ static enum status parse_file(const char *file_name,
   clear_data(path_list, path_list_size,
    file_list, file_list_size);
 
-  if(!display_filename_only)
+  if(!display_filename_only && !output_format_csv)
    fprintf(stdout, "\nFinished processing '%s'.\n\n", file_name);
 
   fflush(stdout);
@@ -2904,12 +3263,12 @@ int main(int argc, char *argv[])
             fprintf(stderr, USAGE);
             return SUCCESS;
 
-          case 'A': // Legacy equivalent of -Mc
+          case 'A':
             display_not_found = true;
-            display_found = false;
+            display_found = true;
             display_created = true;
             display_unused = false;
-            display_wildcard = false;
+            display_wildcard = true;
             break;
 
           case 'C':
@@ -3009,6 +3368,14 @@ int main(int argc, char *argv[])
             display_filename_only = true;
             display_details = false;
             display_all_details = false;
+            break;
+
+          case 'z':
+            display_crc32 = true;
+            break;
+
+          case 'V':
+            output_format_csv = true;
             break;
 
           case 'L':

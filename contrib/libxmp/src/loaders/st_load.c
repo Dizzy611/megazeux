@@ -1,5 +1,5 @@
 /* Extended Module Player
- * Copyright (C) 1996-2016 Claudio Matsuoka and Hipolito Carraro Jr
+ * Copyright (C) 1996-2021 Claudio Matsuoka and Hipolito Carraro Jr
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -24,7 +24,6 @@
  * written by Michael Schwendt <sidplay@geocities.com>
  */
 
-#include <ctype.h>
 #include "loader.h"
 #include "mod.h"
 #include "period.h"
@@ -91,6 +90,9 @@ static int st_test(HIO_HANDLE *f, char *t, const int start)
 		return -1;
 
 	for (i = 0; i < 15; i++) {
+		/* Crepequs.mod has random values in first byte */
+		mh.ins[i].name[0] = 'X';
+
 		if (libxmp_test_name(mh.ins[i].name, 22) < 0)
 			return -1;
 
@@ -112,7 +114,7 @@ static int st_test(HIO_HANDLE *f, char *t, const int start)
 		if (mh.ins[i].loop_size > 0x8000)
 			return -1;
 
-		/* This test fails in atmosfer.mod, disable it 
+		/* This test fails in atmosfer.mod, disable it
 		 *
 		 * if (mh.ins[i].loop_size > 1 && mh.ins[i].loop_size > mh.ins[i].size)
 		 *    return -1;
@@ -131,44 +133,63 @@ static int st_test(HIO_HANDLE *f, char *t, const int start)
 		smp_size += 2 * mh.ins[i].size;
 	}
 
-	if (smp_size < 8)
+	if (smp_size < 8) {
 		return -1;
+	}
 
 	for (ins = i = 0; i < pat; i++) {
 		for (j = 0; j < (64 * 4); j++) {
 			int p, s;
 
-			hio_read(mod_event, 1, 4, f);
+			if (hio_read(mod_event, 1, 4, f) < 4) {
+				return -1;
+			}
 
 			s = (mod_event[0] & 0xf0) | MSN(mod_event[2]);
 
-			if (s > 15)	/* sample number > 15 */
-				return -1;
+			if (s > 15) {	/* sample number > 15 */
+				/* cant.mod has this invalid sample number */
+				if (!(s == 64 && i == 3 && j == 183)) {
+					D_(D_CRIT "%d/%d/%d: invalid sample number: %d", i, j / 4, j % 4, s);
+					return -1;
+				}
+			}
 
-			if (s > ins)	/* find highest used sample */
+			if (s > ins) {	/* find highest used sample */
 				ins = s;
+			}
 
 			p = 256 * LSN(mod_event[0]) + mod_event[1];
 
-			if (p == 0)
+			if (p == 0) {
 				continue;
+			}
 
-			if (p == 162)	/* used in Karsten Obarski's blueberry.mod */
+			/* another special check for cant.mod */
+			if (p == 3792 && i == 3 && j == 183) {
 				continue;
+			}
+
+			/* used in Karsten Obarski's blueberry.mod */
+			if (p == 162) {
+				continue;
+			}
 
 			for (k = 0; period[k] >= 0; k++) {
 				if (p == period[k])
 					break;
 			}
-			if (period[k] < 0)
+			if (period[k] < 0) {
+				D_(D_CRIT "%d/%d/%d: invalid period", i, j / 4, j % 4);
 				return -1;
+			}
 		}
 	}
 
 	/* Check if file was cut before any unused samples */
 	if (size < 600 + pat * 1024 + smp_size) {
 		int ss;
-		for (ss = i = 0; i < ins; i++) {
+		for (ss = i = 0; i < 15 && i < ins; i++) {
 			ss += 2 * mh.ins[i].size;
 		}
 
@@ -193,7 +214,7 @@ static int st_load(struct module_data *m, HIO_HANDLE *f, const int start)
 	uint8 mod_event[4];
 	int ust = 1;
 	/* int lps_mult = m->fetch & XMP_CTL_FIXLOOP ? 1 : 2; */
-	char *modtype;
+	const char *modtype;
 	int fxused;
 	int pos;
 	int used_ins;		/* Number of samples actually used */
@@ -340,7 +361,7 @@ static int st_load(struct module_data *m, HIO_HANDLE *f, const int start)
 	} else if ((fxused & ~0xf807) == 0) {
 		modtype = "D.O.C Soundtracker 2.0";
 	} else {
-		modtype = "unknown tracker";
+		modtype = "unknown tracker 15 instrument";
 	}
 
 	snprintf(mod->type, XMP_NAME_SIZE, "%s", modtype);

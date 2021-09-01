@@ -27,8 +27,9 @@
 #include "event.h"
 #include "game_menu.h"
 #include "game_player.h"
-#include "settings.h"
 #include "graphics.h"
+#include "settings.h"
+#include "util.h"
 #include "window.h"
 #include "world.h"
 #include "world_struct.h"
@@ -635,7 +636,7 @@ static void draw_game_status(struct world *mzx_world)
 static boolean menu_draw(context *ctx)
 {
   struct game_menu_context *game_menu = (struct game_menu_context *)ctx;
-  Uint32 color;
+  unsigned int color;
   int x;
   int y;
   int i;
@@ -666,6 +667,7 @@ static boolean menu_draw(context *ctx)
     x = game_menu->x + 1;
     y = + game_menu->y + 1 + i;
     color_line(game_menu->width - 2, x, y, MENU_COL_SELECTED);
+    cursor_hint(x + 1, y);
     //write_string(game_menu->options[i].label, x, y, MENU_COL_SELECTED, false);
 
     x = game_menu->x + 1;
@@ -1149,6 +1151,7 @@ static void menu_destroy(context *ctx)
     else
       main_menu_last_selected = (enum main_menu_opts)which;
   }
+  cursor_off();
   restore_screen();
 }
 

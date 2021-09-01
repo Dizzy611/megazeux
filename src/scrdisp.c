@@ -67,9 +67,9 @@ static void scroll_frame(struct world *mzx_world, struct scroll *scroll,
   fill_line_ext(64, 8, 12, 32, scroll_base_color, 0, c_offset);
 
   if(mask_chars)
-    write_line_mask(where + pos, 8, 12, scroll_base_color, 1);
+    write_line_mask(where + pos, 8, 12, scroll_base_color, true);
   else
-    write_line_ext(where + pos, 8, 12, scroll_base_color, 1, 0, c_offset);
+    write_line_ext(where + pos, 8, 12, scroll_base_color, true, 0, c_offset);
 
   // Display lines above center line
   for(t1 = 11; t1 >= 6; t1--)
@@ -88,9 +88,9 @@ static void scroll_frame(struct world *mzx_world, struct scroll *scroll,
         // At start of prev. line -1. Display.
         pos++;
         if(mask_chars)
-          write_line_mask(where + pos, 8, t1, scroll_base_color, 1);
+          write_line_mask(where + pos, 8, t1, scroll_base_color, true);
         else
-          write_line_ext(where + pos, 8, t1, scroll_base_color, 1, 0, c_offset);
+          write_line_ext(where + pos, 8, t1, scroll_base_color, true, 0, c_offset);
       }
     }
     // Next line...
@@ -108,9 +108,9 @@ static void scroll_frame(struct world *mzx_world, struct scroll *scroll,
     if(where[pos])
     {
       if(mask_chars)
-        write_line_mask(where + pos, 8, t1, scroll_base_color, 1);
+        write_line_mask(where + pos, 8, t1, scroll_base_color, true);
       else
-        write_line_ext(where + pos, 8, t1, scroll_base_color, 1, 0, c_offset);
+        write_line_ext(where + pos, 8, t1, scroll_base_color, true, 0, c_offset);
     }
     // Next line...
   }
@@ -151,6 +151,7 @@ void scroll_edit(struct world *mzx_world, struct scroll *scroll, int type)
     // Display scroll. If editing, the colors of the frame need to be masked.
     // Otherwise, they should display using game colors.
     scroll_frame(mzx_world, scroll, pos, mask_chars, editing);
+    cursor_hint(8, 12);
     update_screen();
 
     if(editing)
@@ -403,6 +404,7 @@ void scroll_edit(struct world *mzx_world, struct scroll *scroll, int type)
     // Continue?
   } while(key != IKEY_ESCAPE);
   // Restore screen and exit
+  cursor_off();
   restore_screen();
   // Due to a faulty check, 2.83 through 2.91f always stay faded in here.
   // If something is found that relies on that, make this conditional.
@@ -620,6 +622,7 @@ void help_display(struct world *mzx_world, char *help, int offs, char *file,
     help_frame(mzx_world, help, pos);
     mclick = 0;
 
+    cursor_hint(8, 12);
     update_screen();
 
     update_event_status_delay();
@@ -828,6 +831,7 @@ void help_display(struct world *mzx_world, char *help, int offs, char *file,
 ex:
   dialog_fadeout();
 
+  cursor_off();
   restore_screen();
 }
 

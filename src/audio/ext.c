@@ -24,9 +24,10 @@
 #include <string.h>
 
 #include "audio.h"
+#include "audio_struct.h"
 #include "ext.h"
 
-#include "../util.h"
+#include "../io/path.h"
 
 struct registry_entry
 {
@@ -66,16 +67,16 @@ void audio_ext_free_registry(void)
 }
 
 struct audio_stream *audio_ext_construct_stream(char *filename,
- Uint32 frequency, Uint32 volume, Uint32 repeat)
+ uint32_t frequency, unsigned int volume, boolean repeat)
 {
   struct audio_stream *a_return = NULL;
-  int ext_pos;
+  ssize_t ext_pos;
   int i;
 
   if(!audio.music_on)
     return NULL;
 
-  ext_pos = get_ext_pos(filename);
+  ext_pos = path_get_ext_offset(filename);
 
   // Must contain a valid ext
   if(ext_pos < 0 || ext_pos >= (int)strlen(filename))

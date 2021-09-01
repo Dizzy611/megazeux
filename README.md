@@ -3,7 +3,7 @@
 
 MegaZeux is a game creation system (GCS) created by game developer Alexis Janson in 1994.
 Originally a DOS program, in 2005 a multi-platform port was released by Exophase. The most
-recent version of MegaZeux is 2.92b, which was released on September 23rd, 2019.
+recent version of MegaZeux is 2.92f, which was released on November 22nd, 2020.
 
 MegaZeux is officially supported on Windows, Linux/BSD, MacOS, as well as the NDS, 3DS, Wii,
 and PSP consoles. Historical support has also existed for GP2X, Pandora, and AmigaOS 4.
@@ -11,25 +11,28 @@ and PSP consoles. Historical support has also existed for GP2X, Pandora, and Ami
 ## Downloads
 
 Windows releases are packaged with a copy of the game Caverns of Zeux.
-Older versions are available at [DigitalMZX](https://vault.digitalmzx.net/).
+Older versions are available at [DigitalMZX](https://www.digitalmzx.com/).
 
 <!-- Download URLs. -->
-[megazeux-w64]: https://vault.digitalmzx.net/download.php?latest=windows64
-[megazeux-w32]: https://vault.digitalmzx.net/download.php?latest=windows32
-[megazeux-dos]: https://vault.digitalmzx.net/download.php?latest=dos
-[megazeux-osx]: https://vault.digitalmzx.net/download.php?latest=osx
-[megazeux-ppc]: https://vault.digitalmzx.net/download.php?latest=osxppc
-[megazeux-u64]: https://vault.digitalmzx.net/download.php?latest=ubuntu64
-[megazeux-u32]: https://vault.digitalmzx.net/download.php?latest=ubuntu32
-[megazeux-d64]: https://vault.digitalmzx.net/download.php?latest=debian64
-[megazeux-d32]: https://vault.digitalmzx.net/download.php?latest=debian32
-[megazeux-rpi]: https://vault.digitalmzx.net/download.php?latest=raspbian
-[megazeux-nds]: https://vault.digitalmzx.net/download.php?latest=nds
-[megazeux-3ds]: https://vault.digitalmzx.net/download.php?latest=3ds
-[megazeux-wii]: https://vault.digitalmzx.net/download.php?latest=wii
-[megazeux-swi]: https://vault.digitalmzx.net/download.php?latest=switch
-[megazeux-psp]: https://vault.digitalmzx.net/download.php?latest=psp
-[megazeux-src]: https://vault.digitalmzx.net/download.php?latest=src
+[megazeux-w64]: https://www.digitalmzx.com/download.php?latest=windows64
+[megazeux-w32]: https://www.digitalmzx.com/download.php?latest=windows32
+[megazeux-dos]: https://www.digitalmzx.com/download.php?latest=dos
+[megazeux-osx]: https://www.digitalmzx.com/download.php?latest=osx
+[megazeux-ppc]: https://www.digitalmzx.com/download.php?latest=osxppc
+[megazeux-u64]: https://www.digitalmzx.com/download.php?latest=ubuntu64
+[megazeux-u32]: https://www.digitalmzx.com/download.php?latest=ubuntu32
+[megazeux-d64]: https://www.digitalmzx.com/download.php?latest=debian64
+[megazeux-d32]: https://www.digitalmzx.com/download.php?latest=debian32
+[megazeux-f64]: https://www.digitalmzx.com/download.php?latest=fedora64
+[megazeux-rpi]: https://www.digitalmzx.com/download.php?latest=raspbian
+[megazeux-and]: https://www.digitalmzx.com/download.php?latest=android
+[megazeux-html]: https://www.digitalmzx.com/download.php?latest=html5
+[megazeux-nds]: https://www.digitalmzx.com/download.php?latest=nds
+[megazeux-3ds]: https://www.digitalmzx.com/download.php?latest=3ds
+[megazeux-wii]: https://www.digitalmzx.com/download.php?latest=wii
+[megazeux-swi]: https://www.digitalmzx.com/download.php?latest=switch
+[megazeux-psp]: https://www.digitalmzx.com/download.php?latest=psp
+[megazeux-src]: https://www.digitalmzx.com/download.php?latest=src
 
 <!-- Images for download links. -->
 [arch-w64]: contrib/archicons/windows64.png "Windows x64"
@@ -41,7 +44,10 @@ Older versions are available at [DigitalMZX](https://vault.digitalmzx.net/).
 [arch-u32]: contrib/archicons/ubuntu32.png  "Ubuntu i386"
 [arch-d64]: contrib/archicons/debian64.png  "Debian AMD64"
 [arch-d32]: contrib/archicons/debian32.png  "Debian i386"
+[arch-f64]: contrib/archicons/fedora64.png  "Fedora x86_64"
 [arch-rpi]: contrib/archicons/raspbian.png  "Raspbian"
+[arch-and]: contrib/archicons/android.png   "Android"
+[arch-html]:contrib/archicons/html5.png     "HTML5 (Emscripten)"
 [arch-aur]: contrib/archicons/archlinux.png "Arch Linux (via AUR)"
 [arch-void]:contrib/archicons/voidlinux.png "Void Linux"
 [arch-gen]: contrib/archicons/gentoo.png    "Gentoo"
@@ -59,10 +65,15 @@ Older versions are available at [DigitalMZX](https://vault.digitalmzx.net/).
 &nbsp; [![Windows x64         ][arch-w64]][megazeux-w64]
 &nbsp; [![Windows x86         ][arch-w32]][megazeux-w32]
 &nbsp; [![Mac OS X            ][arch-osx]][megazeux-osx]
+&nbsp; [![Mac OS X (PowerPC)  ][arch-ppc]][megazeux-ppc]
 &nbsp; [![Ubuntu AMD64        ][arch-u64]][megazeux-u64]
 &nbsp; [![Ubuntu i386         ][arch-u32]][megazeux-u32]
 &nbsp; [![Debian AMD64        ][arch-d64]][megazeux-d64]
 &nbsp; [![Debian i386         ][arch-d32]][megazeux-d32]
+&nbsp; [![Fedora x86_64       ][arch-f64]][megazeux-f64]
+&nbsp; [![Raspbian            ][arch-rpi]][megazeux-rpi]
+&nbsp; [![Android             ][arch-and]][megazeux-and]
+&nbsp; [![HTML5 (Emscripten)  ][arch-html]][megazeux-html]
 &nbsp; [![Nintendo DS         ][arch-nds]][megazeux-nds]
 &nbsp; [![Nintendo 3DS        ][arch-3ds]][megazeux-3ds]
 &nbsp; [![Nintendo Wii        ][arch-wii]][megazeux-wii]
@@ -79,24 +90,23 @@ The following platforms have MegaZeux releases available via repository:
 &nbsp; [![GP2X (outdated)][arch-gp2x]](https://dl.openhandhelds.org/cgi-bin/gp2x.cgi?0,0,0,0,26,2920)
 &nbsp; [![Pandora (outdated)][arch-pand]](https://repo.openpandora.org/?page=detail&app=megazeux_ptitseb)
 
-Downloads are also available for the following platforms, but are not regularly updated:
+Downloads are also available for the following platform(s), but these
+platform(s) are not regularly updated:
 
-&nbsp; [![Mac OS X (PowerPC)  ][arch-ppc]][megazeux-ppc]
-&nbsp; [![Raspbian            ][arch-rpi]][megazeux-rpi]
 &nbsp; [![MS DOS (MZX 2.70)   ][arch-dos]][megazeux-dos]
 
 ## Credits
 
-| MegaZeux 2.9x     |                                  |
-| ----------------- | -------------------------------- |
-| Alice Rowan       | Developer/current maintainer     |
-| Dr. Lancer X      | Developer (layer rendering)      |
-| Adrian Siekierka  | Developer (various ports)        |
-| Alistair Strachan | Developer (initial SDL 2 support)|
-| Terryn            | Help file                        |
-| Spectere          | Mac OS X builds                  |
-| Insidious         | Ubuntu/Debian builds             |
-| Others            | Various                          |
+| MegaZeux 2.9x     |                                                            |
+| ----------------- | ---------------------------------------------------------- |
+| Alice Rowan       | Development/current maintainer                             |
+| Terryn            | Help file; testing                                         |
+| Lancer X          | Development; testing                                       |
+| Adrian Siekierka  | Development; testing; various ports                        |
+| Insidious         | Development; testing; Ubuntu/Debian/Raspbian/Arch packages |
+| Spectere          | Development; testing; Xcode and MSVC projects              |
+| Alistair Strachan | Development                                                |
+| Others            | Various                                                    |
 
 #### MegaZeux Credits
 
@@ -125,12 +135,12 @@ Other past contributors: Spider124, Koji, JZig, Akwende, MenTaLguY.
 
 #### Special Thanks
 
-Insidious (.deb Builds)
+Insidious (Testing, .deb and Arch packages)
+Spectere (Testing, OS X Builds, MSVC project)
+Terryn (Testing)
 mzxgiant (MSVC Testing, Bug Fixes)
 mzxrules (Testing)
 Quantum P. (OS X Testing / Builds)
-Spectere (OS X Builds)
-Terryn (Testing)
 Wervyn (Testing)
 
 ## License
@@ -156,14 +166,14 @@ The MegaZeux community and development team can be contacted through Discord,
 GitHub, or the DigitalMZX forums.
 
 [MegaZeux Discord](https://discord.gg/XJCvb4P) <br/>
-[DigitalMZX forums](https://digitalmzx.net/forums/) <br/>
-[MegaZeux Bug tracker](https://www.digitalmzx.net/forums/index.php?app=tracker&showproject=4) <br/>
-[MegaZeux Feature requests](https://www.digitalmzx.net/forums/index.php?app=tracker&showproject=9) <br/>
+[DigitalMZX forums](https://www.digitalmzx.com/forums/) <br/>
+[MegaZeux Bug tracker](https://www.digitalmzx.com/forums/index.php?app=tracker&showproject=4) <br/>
+[MegaZeux Feature requests](https://www.digitalmzx.com/forums/index.php?app=tracker&showproject=9) <br/>
 [AliceLR on GitHub](https://github.com/AliceLR) <br/>
 
 ## Resources
 
-[Official MegaZeux game archive](https://vault.digitalmzx.net/) <br/>
-[MegaZeux help file](https://vault.digitalmzx.net/help.php) <br/>
-[Development roadmap](https://www.digitalmzx.net/forums/index.php?showtopic=15226) <br/>
-[Compiling MegaZeux on the official Wiki](https://www.digitalmzx.net/wiki/index.php?title=Compiling)
+[Official MegaZeux game archive](https://www.digitalmzx.com/) <br/>
+[MegaZeux help file](https://www.digitalmzx.com/help.php) <br/>
+[Development roadmap](https://www.digitalmzx.com/forums/index.php?showtopic=15226) <br/>
+[Compiling MegaZeux on the official Wiki](https://www.digitalmzx.com/wiki/index.php?title=Compiling)

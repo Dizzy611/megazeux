@@ -18,7 +18,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-// Definitions for audio.cpp
+// Definitions for audio.c
 
 #ifndef __AUDIO_H
 #define __AUDIO_H
@@ -27,108 +27,16 @@
 
 __M_BEGIN_DECLS
 
-#include "../platform.h"
-#include "../configure.h"
-
 #ifdef CONFIG_AUDIO
 
-#ifdef CONFIG_MODPLUG
-#include "modplug.h"
-#endif
-
-// WAV sample types
-#define SAMPLE_U8     0
-#define SAMPLE_S8     1
-#define SAMPLE_S16LSB 2
+#include <stdint.h>
 
 // Default period for .SAM files.
 #define SAM_DEFAULT_PERIOD 428
 
-struct wav_info
-{
-  Uint8 *wav_data;
-  Uint32 data_length;
-  Uint32 channels;
-  Uint32 freq;
-  Uint16 format;
-  Uint32 loop_start;
-  Uint32 loop_end;
-};
-
-struct audio_stream
-{
-  struct audio_stream *next;
-  struct audio_stream *previous;
-  boolean is_spot_sample;
-  Uint32 volume;
-  Uint32 repeat;
-  Uint32 (* mix_data)(struct audio_stream *a_src, Sint32 *buffer, Uint32 len);
-  void (* set_volume)(struct audio_stream *a_src, Uint32 volume);
-  void (* set_repeat)(struct audio_stream *a_src, Uint32 repeat);
-  void (* set_order)(struct audio_stream *a_src, Uint32 order);
-  void (* set_position)(struct audio_stream *a_src, Uint32 pos);
-  void (* set_loop_start)(struct audio_stream *a_src, Uint32 pos);
-  void (* set_loop_end)(struct audio_stream *a_src, Uint32 pos);
-  Uint32 (* get_order)(struct audio_stream *a_src);
-  Uint32 (* get_position)(struct audio_stream *a_src);
-  Uint32 (* get_length)(struct audio_stream *a_src);
-  Uint32 (* get_loop_start)(struct audio_stream *a_src);
-  Uint32 (* get_loop_end)(struct audio_stream *a_src);
-  boolean (* get_sample)(struct audio_stream *a_src, Uint32 which,
-   struct wav_info *dest);
-  void (* destruct)(struct audio_stream *a_src);
-};
-
-struct audio_stream_spec
-{
-  Uint32 (* mix_data)(struct audio_stream *a_src, Sint32 *buffer, Uint32 len);
-  void (* set_volume)(struct audio_stream *a_src, Uint32 volume);
-  void (* set_repeat)(struct audio_stream *a_src, Uint32 repeat);
-  void (* set_order)(struct audio_stream *a_src, Uint32 order);
-  void (* set_position)(struct audio_stream *a_src, Uint32 pos);
-  void (* set_loop_start)(struct audio_stream *a_src, Uint32 pos);
-  void (* set_loop_end)(struct audio_stream *a_src, Uint32 pos);
-  Uint32 (* get_order)(struct audio_stream *a_src);
-  Uint32 (* get_position)(struct audio_stream *a_src);
-  Uint32 (* get_length)(struct audio_stream *a_src);
-  Uint32 (* get_loop_start)(struct audio_stream *a_src);
-  Uint32 (* get_loop_end)(struct audio_stream *a_src);
-  boolean (* get_sample)(struct audio_stream *a_src, Uint32 which,
-   struct wav_info *dest);
-  void (* destruct)(struct audio_stream *a_src);
-};
-
-struct audio
-{
-#ifdef CONFIG_MODPLUG
-  // for config.txt settings only
-  ModPlug_Settings mod_settings;
-#endif
-
-  Sint32 *mix_buffer;
-
-  Uint32 buffer_samples;
-
-  Uint32 output_frequency;
-  Uint32 master_resample_mode;
-  Sint32 max_simultaneous_samples;
-  Sint32 max_simultaneous_samples_config;
-
-  struct audio_stream *primary_stream;
-  struct audio_stream *pcs_stream;
-  struct audio_stream *stream_list_base;
-  struct audio_stream *stream_list_end;
-
-  platform_mutex audio_mutex;
-
-  Uint32 music_on;
-  Uint32 pcs_on;
-  Uint32 music_volume;
-  Uint32 sound_volume;
-  Uint32 pcs_volume;
-};
-
-extern struct audio audio;
+struct config_info;
+struct audio_stream;
+struct audio_stream_spec;
 
 CORE_LIBSPEC void init_audio(struct config_info *conf);
 CORE_LIBSPEC void quit_audio(void);
@@ -165,16 +73,16 @@ void audio_set_music_volume(int volume);
 void audio_set_sound_volume(int volume);
 void audio_set_pcs_volume(int volume);
 
-int audio_legacy_translate(const char *path, char newpath[MAX_PATH]);
+int audio_legacy_translate(const char *path, char *newpath, size_t buffer_len);
 
 // Internal functions
 int audio_get_real_frequency(int period);
 void destruct_audio_stream(struct audio_stream *a_src);
 void initialize_audio_stream(struct audio_stream *a_src,
- struct audio_stream_spec *a_spec, Uint32 volume, Uint32 repeat);
+ struct audio_stream_spec *a_spec, unsigned int volume, boolean repeat);
 
 // Platform-related functions.
-void audio_callback(Sint16 *stream, int len);
+void audio_callback(int16_t *stream, size_t len);
 void init_audio_platform(struct config_info *conf);
 void quit_audio_platform(void);
 
@@ -218,7 +126,7 @@ static inline void audio_set_sound_volume(int volume) {}
 static inline void audio_set_pcs_volume(int volume) {}
 
 static inline int audio_legacy_translate(const char *path,
- char newpath[MAX_PATH]) { return -1; }
+ char *newpath, size_t buffer_len) { return -1; }
 
 #endif // CONFIG_AUDIO
 

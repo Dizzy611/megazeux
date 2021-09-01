@@ -74,8 +74,10 @@ install: install-check install-arch
 		docs/changelog.txt.gz \
 		docs/mzxhelp.html.gz \
 		docs/macro.txt \
+		docs/fileform.html \
 		docs/keycodes.html \
 		docs/joystick.html \
+		docs/cycles_and_commands.txt \
 		${DESTDIR}${SHAREDIR}/doc/megazeux/
 	@${RM} -f docs/changelog.txt.gz
 	@${RM} -f docs/mzxhelp.html.gz
@@ -96,7 +98,7 @@ ifeq (${BUILD_EDITOR},1)
 	@${install} -m 0755 -d ${DESTDIR}${GAMESDIR} && \
 	 ${install} -m 0755 ${mzx} ${DESTDIR}${GAMESDIR}/ && \
 	 ${install} -m 0644 assets/ascii.chr assets/blank.chr \
-		assets/smzx.chr ${DESTDIR}${SHAREDIR}/megazeux/assets
+		assets/smzx.chr assets/smzx2.chr ${DESTDIR}${SHAREDIR}/megazeux/assets
 endif
 ifeq (${BUILD_UTILS},1)
 	@${install} -m 0755 -d ${DESTDIR}${BINDIR} && \
@@ -176,6 +178,7 @@ ifeq (${BUILD_UTILS},1)
 		${DESTDIR}${BINDIR}/downver \
 		${DESTDIR}${BINDIR}/hlp2txt \
 		${DESTDIR}${BINDIR}/txt2hlp \
+		${DESTDIR}${BINDIR}/png2smzx \
 		${DESTDIR}${BINDIR}/ccv
 endif
 	@echo Done.

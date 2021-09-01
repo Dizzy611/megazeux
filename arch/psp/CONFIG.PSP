@@ -1,8 +1,8 @@
-#!/bin/bash
+#!/bin/sh
 
 [[ -z $PSPDEV ]] && { echo "\$PSPDEV is unset. Aborting"; exit 1; }
 
 ./config.sh --platform psp --prefix $PSPDEV/psp --optimize-size \
             --disable-editor --disable-helpsys --disable-utils \
             --disable-libsdl2 --enable-release --enable-meter \
-            --enable-tremor-lowmem --enable-stdio-redirect "$@"
+            --enable-extram --enable-tremor-lowmem --enable-stdio-redirect "$@"

@@ -31,9 +31,17 @@
 #include "render_layer.h"
 #include "renderers.h"
 #include "util.h"
+#include "io/path.h"
+#include "io/vio.h"
+
+// Uncomment to enable GL debug output (requires OpenGL 4.3+).
+//#define ENABLE_GL_DEBUG_OUTPUT 1
 
 #ifdef CONFIG_SDL
 #include "render_sdl.h"
+#ifdef ENABLE_GL_DEBUG_OUTPUT
+#include <SDL_opengl_glext.h>
+#endif
 #endif
 
 #ifdef CONFIG_EGL
@@ -48,6 +56,14 @@ typedef GLint GLiftype;
 #endif
 
 #include "render_gl.h"
+
+#ifndef GL_FRAMEBUFFER
+#define GL_FRAMEBUFFER GL_FRAMEBUFFER_EXT
+#endif
+
+#ifndef GL_COLOR_ATTACHMENT0
+#define GL_COLOR_ATTACHMENT0 GL_COLOR_ATTACHMENT0_EXT
+#endif
 
 static const struct gl_version gl_required_version = { 2, 0 };
 
@@ -80,19 +96,33 @@ static const struct gl_version gl_required_version = { 2, 0 };
 #define TEX_DATA_LAYER_Y 901
 
 // NOTE: Layer data packing scheme
-// (highest two bits currently unused but included as part of the char)
+// This is intentionally wasteful so the components don't interfere with each
+// other on old and embedded cards with poor float precision.
+// C = char.
+// B = background color (0-15 normal; >=16 protected)
+// F = foreground color (0-15 normal; >=16 protected)
+// For SMZX, the subpalette number P is sent in place of B and F. If this value
+// is FULL_PAL_SIZE, the char will be treated as transparent. If B or F is sent
+// as PAL_SIZE + PROTECTED_PAL_SIZE, that individual color will be transparent.
 // w        z        y        x
 // 00000000 00000000 00000000 00000000
-// CCCCCCCC CCCCCCBB BBBBBBBF FFFFFFFF
+// CCCCCCCC CCCCCCCC BBBBBBBB FFFFFFFF
+#define LAYER_SUBPALETTE_POS 0
 #define LAYER_FG_POS 0
-#define LAYER_BG_POS 9
-#define LAYER_CHAR_POS 18
+#define LAYER_BG_POS 8
+#define LAYER_CHAR_POS 16
 
 enum
 {
   TEX_SCREEN_ID,
   TEX_DATA_ID,
   NUM_TEXTURES
+};
+
+enum
+{
+  FBO_SCREEN_TEX,
+  NUM_FBOS
 };
 
 enum
@@ -122,6 +152,9 @@ static struct blacklist_entry auto_glsl_blacklist[] =
     "  MESA software renderer.\n"
     "  Blacklisted due to poor performance on some machines.\n" },
   { "llvmpipe",
+    "  MESA software renderer.\n"
+    "  Blacklisted due to poor performance on some machines.\n" },
+  { "Software Rasterizer",
     "  MESA software renderer.\n"
     "  Blacklisted due to poor performance on some machines.\n" },
   { "Chromium",
@@ -186,6 +219,23 @@ static struct
   void (GL_APIENTRY *glDeleteProgram)(GLuint program);
   void (GL_APIENTRY *glGetAttachedShaders)(GLuint program, GLsizei maxCount,
    GLsizei *count, GLuint *shaders);
+  GLint (GL_APIENTRY *glGetUniformLocation)(GLuint program, const char *name);
+  void (GL_APIENTRY *glUniform1f)(GLint location, GLfloat v0);
+#ifdef CONFIG_GLES
+  void (GL_APIENTRY *glGetShaderPrecisionFormat)(GLenum shaderType,
+   GLenum precisionType, GLint *range, GLint *precision);
+#endif
+#ifdef ENABLE_GL_DEBUG_OUTPUT
+  void (GL_APIENTRY *glDebugMessageCallback)(GLDEBUGPROC callback, void *param);
+#endif
+
+  // FBO functions are optional for GL (requires 3.0+), mandatory for GLES.
+  boolean has_fbo;
+  void (GL_APIENTRY *glGenFramebuffers)(GLsizei n, GLuint *ids);
+  void (GL_APIENTRY *glDeleteFramebuffers)(GLsizei n, GLuint *framebuffers);
+  void (GL_APIENTRY *glBindFramebuffer)(GLenum target, GLuint framebuffer);
+  void (GL_APIENTRY *glFramebufferTexture2D)(GLenum target, GLenum attachment,
+   GLenum textarget, GLuint texture, GLint level);
 }
 glsl;
 
@@ -216,15 +266,32 @@ static const struct dso_syms_map glsl_syms_map[] =
   { "glGetShaderInfoLog",         (fn_ptr *)&glsl.glGetShaderInfoLog },
   { "glGetShaderiv",              (fn_ptr *)&glsl.glGetShaderiv },
   { "glGetString",                (fn_ptr *)&glsl.glGetString },
+  { "glGetUniformLocation",       (fn_ptr *)&glsl.glGetUniformLocation },
   { "glLinkProgram",              (fn_ptr *)&glsl.glLinkProgram },
   { "glShaderSource",             (fn_ptr *)&glsl.glShaderSource },
   { "glTexImage2D",               (fn_ptr *)&glsl.glTexImage2D },
   { "glTexParameterf",            (fn_ptr *)&glsl.glTexParameterf },
   { "glTexSubImage2D",            (fn_ptr *)&glsl.glTexSubImage2D },
+  { "glUniform1f",                (fn_ptr *)&glsl.glUniform1f },
   { "glUseProgram",               (fn_ptr *)&glsl.glUseProgram },
   { "glVertexAttribPointer",      (fn_ptr *)&glsl.glVertexAttribPointer },
   { "glViewport",                 (fn_ptr *)&glsl.glViewport },
+#ifdef CONFIG_GLES
+  { "glGetShaderPrecisionFormat", (fn_ptr *)&glsl.glGetShaderPrecisionFormat },
+#endif
+#ifdef ENABLE_GL_DEBUG_OUTPUT
+  { "glDebugMessageCallback",     (fn_ptr *)&glsl.glDebugMessageCallback },
+#endif
   { NULL, NULL}
+};
+
+static const struct dso_syms_map glsl_syms_map_fbo[] =
+{
+  { "glBindFramebuffer",          (fn_ptr *)&glsl.glBindFramebuffer },
+  { "glDeleteFramebuffers",       (fn_ptr *)&glsl.glDeleteFramebuffers },
+  { "glFramebufferTexture2D",     (fn_ptr *)&glsl.glFramebufferTexture2D },
+  { "glGenFramebuffers",          (fn_ptr *)&glsl.glGenFramebuffers },
+  { NULL, NULL }
 };
 
 #define gl_check_error() gl_error(__FILE__, __LINE__, glsl.glGetError)
@@ -237,13 +304,19 @@ struct glsl_render_data
 #ifdef CONFIG_SDL
   struct sdl_render_data sdl;
 #endif
-  Uint32 *pixels;
-  Uint32 charset_texture[CHAR_H * FULL_CHARSET_SIZE * CHAR_W];
-  Uint32 background_texture[BG_WIDTH * BG_HEIGHT];
+  uint32_t *pixels;
+  uint32_t charset_texture[CHAR_H * FULL_CHARSET_SIZE * CHAR_W];
+  uint32_t background_texture[BG_WIDTH * BG_HEIGHT];
   GLuint textures[NUM_TEXTURES];
+  GLuint fbos[NUM_FBOS];
+  GLuint uniform_tilemap_pro_pal;
   GLubyte palette[3 * FULL_PAL_SIZE];
-  Uint8 remap_texture;
-  Uint8 remap_char[FULL_CHARSET_SIZE];
+  boolean remap_texture;
+  boolean remap_char[FULL_CHARSET_SIZE];
+  boolean dirty_palette;
+  boolean dirty_indices;
+  boolean use_software_renderer;
+  int last_tcol;
   GLuint scaler_program;
   GLuint tilemap_program;
   GLuint tilemap_smzx_program;
@@ -293,29 +366,51 @@ static char *glsl_load_string(const char *filename)
 {
   char *buffer = NULL;
   unsigned long size;
-  FILE *f;
+  vfile *vf;
 
-  f = fopen_unsafe(filename, "rb");
-  if(!f)
+  vf = vfopen_unsafe(filename, "rb");
+  if(!vf)
     goto err_out;
 
-  size = ftell_and_rewind(f);
-  if(!size)
+  size = vfilelength(vf, false);
+  if(size <= 0)
     goto err_close;
 
   buffer = cmalloc(size + 1);
   buffer[size] = '\0';
 
-  if(fread(buffer, size, 1, f) != 1)
+  if(vfread(buffer, size, 1, vf) != 1)
   {
     free(buffer);
     buffer = NULL;
   }
 
 err_close:
-  fclose(f);
+  vfclose(vf);
 err_out:
   return buffer;
+}
+
+static boolean glsl_scaling_shader_is_default(struct graphics_data *graphics)
+{
+  return graphics->gl_scaling_shader[0] == '\0';
+}
+
+/**
+ * Sets the name of the current scaling shader. If shader is NULL, this will be
+ * set to the default scaling shader.
+ */
+static void glsl_set_scaling_shader(struct graphics_data *graphics,
+ const char *shader)
+{
+  if(shader)
+  {
+    size_t buf_len = ARRAY_SIZE(graphics->gl_scaling_shader);
+    snprintf(graphics->gl_scaling_shader, buf_len, "%s", shader);
+    graphics->gl_scaling_shader[buf_len - 1] = '\0';
+  }
+  else
+    graphics->gl_scaling_shader[0] = '\0';
 }
 
 static GLuint glsl_load_shader(struct graphics_data *graphics,
@@ -331,7 +426,7 @@ static GLuint glsl_load_shader(struct graphics_data *graphics,
   assert(res >= GLSL_SHADER_RES_FIRST && res <= GLSL_SHADER_RES_LAST);
 
   if(res == GLSL_SHADER_SCALER_VERT || res == GLSL_SHADER_SCALER_FRAG)
-    if(graphics->gl_scaling_shader[0])
+    if(!glsl_scaling_shader_is_default(graphics))
       is_user_scaler = true;
 
   // If we've already seen this shader, it's loaded, and we don't
@@ -344,24 +439,25 @@ static GLuint glsl_load_shader(struct graphics_data *graphics,
       // Try to load these from config before loading the default.
 
       char *path = cmalloc(MAX_PATH);
-
-      strcpy(path, mzx_res_get_by_id(GLSL_SHADER_SCALER_DIRECTORY));
+      size_t path_len = path_clean_slashes_copy(path, MAX_PATH,
+       mzx_res_get_by_id(GLSL_SHADER_SCALER_DIRECTORY));
 
       switch(res)
       {
         case GLSL_SHADER_SCALER_VERT:
-          sprintf(path + strlen(path), "%s%s.vert",
-           DIR_SEPARATOR, graphics->gl_scaling_shader);
+          snprintf(path + path_len, MAX_PATH - path_len,
+           DIR_SEPARATOR "%s.vert", graphics->gl_scaling_shader);
           break;
 
         case GLSL_SHADER_SCALER_FRAG:
-          sprintf(path + strlen(path), "%s%s.frag",
-           DIR_SEPARATOR, graphics->gl_scaling_shader);
+          snprintf(path + path_len, MAX_PATH - path_len,
+           DIR_SEPARATOR "%s.frag", graphics->gl_scaling_shader);
           break;
 
         default:
           break;
       }
+      path[MAX_PATH - 1] = '\0';
 
       source_cache[index] = glsl_load_string(path);
 
@@ -383,7 +479,7 @@ static GLuint glsl_load_shader(struct graphics_data *graphics,
       is_user_scaler = false;
 
       if(res == GLSL_SHADER_SCALER_FRAG)
-        graphics->gl_scaling_shader[0] = 0;
+        glsl_set_scaling_shader(graphics, NULL);
 
       source_cache[index] = glsl_load_string(mzx_res_get_by_id(res));
       if(!source_cache[index])
@@ -447,7 +543,7 @@ static GLuint glsl_load_shader(struct graphics_data *graphics,
     if(is_user_scaler)
     {
       // Attempt the default shader
-      graphics->gl_scaling_shader[0] = 0;
+      glsl_set_scaling_shader(graphics, NULL);
       free(source_cache[index]);
       source_cache[index] = NULL;
 
@@ -522,6 +618,9 @@ static void glsl_load_shaders(struct graphics_data *graphics)
     glsl_delete_shaders(render_data->scaler_program);
   }
 
+  if(render_data->use_software_renderer)
+    return;
+
   render_data->tilemap_program = glsl_load_program(graphics,
    GLSL_SHADER_TILEMAP_VERT, GLSL_SHADER_TILEMAP_FRAG);
   if(render_data->tilemap_program)
@@ -533,6 +632,9 @@ static void glsl_load_shaders(struct graphics_data *graphics)
     glsl.glLinkProgram(render_data->tilemap_program);
     glsl_verify_link(render_data, render_data->tilemap_program);
     glsl_delete_shaders(render_data->tilemap_program);
+
+    render_data->uniform_tilemap_pro_pal = glsl.glGetUniformLocation(
+     render_data->tilemap_program, "protected_pal_position");
   }
 
   render_data->tilemap_smzx_program = glsl_load_program(graphics,
@@ -591,16 +693,17 @@ static boolean glsl_init_video(struct graphics_data *graphics,
   graphics->gl_vsync = conf->gl_vsync;
   graphics->allow_resize = conf->allow_resize;
   graphics->gl_filter_method = conf->gl_filter_method;
-  graphics->gl_scaling_shader = conf->gl_scaling_shader;
   graphics->ratio = conf->video_ratio;
   graphics->bits_per_pixel = 32;
+
+  glsl_set_scaling_shader(graphics, conf->gl_scaling_shader);
 
   // OpenGL only supports 16/32bit colour
   if(conf->force_bpp == 16 || conf->force_bpp == 32)
     graphics->bits_per_pixel = conf->force_bpp;
 
   // Buffer for screen texture
-  render_data->pixels = cmalloc(sizeof(Uint32) * GL_POWER_2_WIDTH *
+  render_data->pixels = cmalloc(sizeof(uint32_t) * GL_POWER_2_WIDTH *
    GL_POWER_2_HEIGHT);
   render_data->conf = conf;
   if(!render_data->pixels)
@@ -636,6 +739,12 @@ static void glsl_free_video(struct graphics_data *graphics)
 
   if(render_data)
   {
+    if(glsl.has_fbo)
+    {
+      glsl.glDeleteFramebuffers(NUM_FBOS, render_data->fbos);
+      gl_check_error();
+    }
+
     glsl.glDeleteTextures(NUM_TEXTURES, render_data->textures);
     gl_check_error();
 
@@ -649,8 +758,8 @@ static void glsl_free_video(struct graphics_data *graphics)
   }
 }
 
-static void glsl_remap_char_range(struct graphics_data *graphics, Uint16 first,
- Uint16 count)
+static void glsl_remap_char_range(struct graphics_data *graphics, uint16_t first,
+ uint16_t count)
 {
   struct glsl_render_data *render_data = graphics->render_data;
 
@@ -659,7 +768,7 @@ static void glsl_remap_char_range(struct graphics_data *graphics, Uint16 first,
 
   // FIXME arbitrary
   if(count <= 256)
-    memset(render_data->remap_char + first, 1, count);
+    memset(render_data->remap_char + first, true, count);
 
   else
     render_data->remap_texture = true;
@@ -689,31 +798,67 @@ static void glsl_resize_screen(struct graphics_data *graphics,
   glsl.glBlendFunc(GL_ONE_MINUS_DST_COLOR, GL_ZERO);
 
   memset(render_data->pixels, 255,
-   sizeof(Uint32) * GL_POWER_2_WIDTH * GL_POWER_2_HEIGHT);
+   sizeof(uint32_t) * GL_POWER_2_WIDTH * GL_POWER_2_HEIGHT);
 
   glsl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, GL_POWER_2_WIDTH,
    GL_POWER_2_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE,
    render_data->pixels);
   gl_check_error();
 
+  if(glsl.has_fbo)
+  {
+    glsl.glDeleteFramebuffers(NUM_FBOS, render_data->fbos);
+    gl_check_error();
+
+    glsl.glGenFramebuffers(NUM_FBOS, render_data->fbos);
+    gl_check_error();
+
+    glsl.glBindFramebuffer(GL_FRAMEBUFFER, render_data->fbos[FBO_SCREEN_TEX]);
+    gl_check_error();
+
+    glsl.glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+     GL_TEXTURE_2D, render_data->textures[TEX_SCREEN_ID], 0);
+  }
+
   // Data texture
-  glsl.glBindTexture(GL_TEXTURE_2D, render_data->textures[TEX_DATA_ID]);
-  gl_check_error();
+  if(!render_data->use_software_renderer)
+  {
+    glsl.glBindTexture(GL_TEXTURE_2D, render_data->textures[TEX_DATA_ID]);
+    gl_check_error();
 
-  gl_set_filter_method(CONFIG_GL_FILTER_NEAREST, glsl.glTexParameterf);
+    gl_set_filter_method(CONFIG_GL_FILTER_NEAREST, glsl.glTexParameterf);
 
-  glsl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, TEX_DATA_WIDTH, TEX_DATA_HEIGHT,
-   0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-  gl_check_error();
+    glsl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, TEX_DATA_WIDTH, TEX_DATA_HEIGHT,
+     0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    gl_check_error();
 
-  glsl_remap_char_range(graphics, 0, FULL_CHARSET_SIZE);
+    glsl_remap_char_range(graphics, 0, FULL_CHARSET_SIZE);
+    render_data->dirty_palette = true;
+    render_data->dirty_indices = true;
+  }
 
   glsl_load_shaders(graphics);
 }
 
+#ifdef ENABLE_GL_DEBUG_OUTPUT
+static void glsl_debug_callback(GLenum source, GLenum type, GLuint id,
+ GLenum severity, GLsizei length, const GLchar *message, const void *userParam)
+{
+  length = length < 0 ? (GLsizei)strlen(message) : length;
+  debug("GL (source 0x%x, type 0x%x, severity 0x%x): %.*s\n",
+    source, type, severity, length, message
+  );
+}
+#endif
+
 static boolean glsl_set_video_mode(struct graphics_data *graphics,
  int width, int height, int depth, boolean fullscreen, boolean resize)
 {
+#ifdef CONFIG_GLES
+  struct glsl_render_data *render_data = graphics->render_data;
+#endif
+  boolean load_fbo_syms = true;
+
   gl_set_attributes(graphics);
 
   if(!gl_set_video_mode(graphics, width, height, depth, fullscreen, resize,
@@ -728,41 +873,89 @@ static boolean glsl_set_video_mode(struct graphics_data *graphics,
     return false;
   }
 
-  // We need a specific version of OpenGL; desktop GL must be 2.0.
+  // GLSL needs a specific version of OpenGL; desktop GL must be 2.0.
   // All OpenGL ES 2.0 implementations are supported, so don't do
   // the check with these configurations.
 #ifndef CONFIG_GLES
   {
-    static boolean initialized = false;
+    const char *version;
+    double version_float;
 
-    if(!initialized)
+    version = (const char *)glsl.glGetString(GL_VERSION);
+    if(!version)
     {
-      const char *version;
-      double version_float;
+      warn("Could not load GL version string.\n");
+      gl_cleanup(graphics);
+      return false;
+    }
 
-      version = (const char *)glsl.glGetString(GL_VERSION);
-      if(!version)
+    version_float = atof(version);
+    if(version_float < 2.0)
+    {
+      warn("Need >= OpenGL 2.0, got OpenGL %.1f.\n", version_float);
+      gl_cleanup(graphics);
+      return false;
+    }
+
+    load_fbo_syms = false;
+    if(version_float >= 3.0)
+    {
+      debug("Attempting to load FBO syms...\n");
+      load_fbo_syms = true;
+    }
+  }
+#else
+  if(!render_data->use_software_renderer)
+  {
+    // All OpenGL ES 2.0 implementations are "technically" supported, but some
+    // may not support highp floats and may not provide adequate precision in
+    // their mediump floats. Print some warnings in this case.
+    GLint range[2];
+    GLint precision;
+
+    glsl.glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_HIGH_FLOAT,
+     range, &precision);
+    if(precision == 0)
+    {
+      warn("no support for high-precision floats in the fragment shader!\n");
+
+      glsl.glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_MEDIUM_FLOAT,
+       range, &precision);
+      warn("fragment mediump float range = (2^-%d, 2^%d), precision = 2^-%d\n",
+       range[0], range[1], precision);
+      if(range[0] <= 11 || precision <= 10)
       {
-        warn("Could not load GL version string.\n");
-        gl_cleanup(graphics);
-        return false;
+        warn("poor medium float precision! "
+         "This renderer may look bad; use \"glslscale\" or \"softscale\" instead.\n");
       }
-
-      version_float = atof(version);
-      if(version_float < 2.0)
-      {
-        warn("Need >= OpenGL 2.0, got OpenGL %.1f.\n", version_float);
-        gl_cleanup(graphics);
-        return false;
-      }
-
-      initialized = true;
     }
   }
 #endif
 
+  if(load_fbo_syms && gl_load_syms(glsl_syms_map_fbo))
+  {
+    debug("Using FBO syms for GLSL renderer.\n");
+    glsl.has_fbo = true;
+  }
+  else
+    glsl.has_fbo = false;
+
+#ifdef ENABLE_GL_DEBUG_OUTPUT
+  glsl.glEnable(GL_DEBUG_OUTPUT);
+  glsl.glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+  glsl.glDebugMessageCallback(glsl_debug_callback, NULL);
+#endif
+
   glsl_resize_screen(graphics, width, height);
   return true;
+}
+
+static boolean glsl_software_set_video_mode(struct graphics_data *graphics,
+ int width, int height, int depth, boolean fullscreen, boolean resize)
+{
+  struct glsl_render_data *render_data = graphics->render_data;
+  render_data->use_software_renderer = true;
+  return glsl_set_video_mode(graphics, width, height, depth, fullscreen, resize);
 }
 
 static boolean glsl_auto_set_video_mode(struct graphics_data *graphics,
@@ -772,15 +965,16 @@ static boolean glsl_auto_set_video_mode(struct graphics_data *graphics,
   const char *renderer;
   int i;
 
-  if(glsl_set_video_mode(graphics, width, height, depth, fullscreen, resize))
+  if(glsl_software_set_video_mode(graphics, width, height, depth, fullscreen, resize))
   {
-    // Driver blacklist. If the renderer is on the blacklist we want to fall
-    // back on software as these renderers have disastrous GLSL performance.
+    // Driver blacklist. If the renderer is on the blacklist, fall back
+    // on software as these renderers have disastrous GLSL performance.
 
     renderer = (const char *)glsl.glGetString(GL_RENDERER);
 
     // Print the full renderer string for reference.
-    info("GL driver: %s\n\n", renderer);
+    info("GL driver: %s\n", renderer);
+    info("GL version: %s\n\n", (const char *)glsl.glGetString(GL_VERSION));
 
     for(i = 0; i < auto_glsl_blacklist_len; i++)
     {
@@ -789,7 +983,8 @@ static boolean glsl_auto_set_video_mode(struct graphics_data *graphics,
         warn(
           "Detected blacklisted driver: \"%s\". Disabling glsl. Reason:\n\n"
           "%s\n\n"
-          "Run again with \"video_output=glsl\" to force-enable glsl.\n\n",
+          "Run again with \"video_output=glsl\" or \"video_output=glslscale\" "
+          "to force-enable glsl.\n\n",
           auto_glsl_blacklist[i].match_string,
           auto_glsl_blacklist[i].reason
         );
@@ -798,23 +993,23 @@ static boolean glsl_auto_set_video_mode(struct graphics_data *graphics,
       }
     }
 
-    // Switch from auto_glsl to glsl now that we know it works.
-    graphics->renderer.set_video_mode = glsl_set_video_mode;
-    strcpy(render_data->conf->video_output, "glsl");
+    // Switch from auto_glsl to glslscale now that it is known to work.
+    graphics->renderer.set_video_mode = glsl_software_set_video_mode;
+    strcpy(render_data->conf->video_output, "glslscale");
 
     return true;
   }
   return false;
 }
 
-static void glsl_remap_char(struct graphics_data *graphics, Uint16 chr)
+static void glsl_remap_char(struct graphics_data *graphics, uint16_t chr)
 {
   struct glsl_render_data *render_data = graphics->render_data;
   render_data->remap_char[chr] = true;
 }
 
 static void glsl_remap_charbyte(struct graphics_data *graphics,
- Uint16 chr, Uint8 byte)
+ uint16_t chr, uint8_t byte)
 {
   glsl_remap_char(graphics, chr);
 }
@@ -857,7 +1052,7 @@ static inline void glsl_do_remap_charsets(struct graphics_data *graphics)
 }
 
 static inline void glsl_do_remap_char(struct graphics_data *graphics,
- Uint16 chr)
+ uint16_t chr)
 {
   struct glsl_render_data *render_data = graphics->render_data;
   signed char *c = (signed char *)graphics->charset;
@@ -879,14 +1074,14 @@ static inline void glsl_do_remap_char(struct graphics_data *graphics,
 }
 
 static void glsl_update_colors(struct graphics_data *graphics,
- struct rgb_color *palette, Uint32 count)
+ struct rgb_color *palette, unsigned int count)
 {
   struct glsl_render_data *render_data = graphics->render_data;
-  Uint32 i;
+  unsigned int i;
   for(i = 0; i < count; i++)
   {
-    graphics->flat_intensity_palette[i] = (0xFF << 24) | (palette[i].b << 16) |
-     (palette[i].g << 8) | palette[i].r;
+    graphics->flat_intensity_palette[i] = gl_pack_u32((0xFF << 24) |
+     (palette[i].b << 16) | (palette[i].g << 8) | palette[i].r);
     render_data->palette[i*3  ] = (GLubyte)palette[i].r;
     render_data->palette[i*3+1] = (GLubyte)palette[i].g;
     render_data->palette[i*3+2] = (GLubyte)palette[i].b;
@@ -898,9 +1093,11 @@ static void glsl_render_layer(struct graphics_data *graphics,
 {
   struct glsl_render_data *render_data = graphics->render_data;
   struct char_element *src = layer->data;
-  Uint32 *colorptr, *dest, i, j;
+  uint32_t *colorptr;
+  uint32_t *dest;
+  unsigned int char_value, fg_color, bg_color, subpalette;
+  unsigned int i, j;
   int width, height;
-  Uint32 char_value, fg_color, bg_color;
 
   int x1 = layer->x;
   int x2 = layer->x + layer->w * CHAR_W;
@@ -928,6 +1125,12 @@ static void glsl_render_layer(struct graphics_data *graphics,
     layer->w, layer->h,
   };
 
+  if(render_data->use_software_renderer)
+  {
+    render_layer(render_data->pixels, 32, SCREEN_PIX_W * 4, graphics, layer);
+    return;
+  }
+
   // Clamp draw area to size of screen texture.
   get_context_width_height(graphics, &width, &height);
   if(width < SCREEN_PIX_W || height < SCREEN_PIX_H)
@@ -948,7 +1151,13 @@ static void glsl_render_layer(struct graphics_data *graphics,
   gl_check_error();
 
   if(layer->mode == 0)
+  {
     glsl.glUseProgram(render_data->tilemap_program);
+    gl_check_error();
+
+    glsl.glUniform1f(render_data->uniform_tilemap_pro_pal,
+     graphics->protected_pal_position);
+  }
   else
     glsl.glUseProgram(render_data->tilemap_smzx_program);
   gl_check_error();
@@ -960,7 +1169,7 @@ static void glsl_render_layer(struct graphics_data *graphics,
   {
     glsl_do_remap_charsets(graphics);
     render_data->remap_texture = false;
-    memset(render_data->remap_char, false, sizeof(Uint8) * FULL_CHARSET_SIZE);
+    memset(render_data->remap_char, false, sizeof(uint8_t) * FULL_CHARSET_SIZE);
   }
   else
   {
@@ -979,31 +1188,32 @@ static void glsl_render_layer(struct graphics_data *graphics,
 
   for(i = 0; i < layer->w * layer->h; i++, dest++, src++)
   {
+    // NOTE: leave the bg_color and fg_color in their current form where the
+    // protected palette starts at 16. This makes it easier to send data to the
+    // shader.
     char_value = src->char_value;
     bg_color = src->bg_color;
     fg_color = src->fg_color;
+    subpalette = ((bg_color & 0xF) << 4) | (fg_color & 0xF);
 
     if(char_value != INVISIBLE_CHAR)
     {
       if(char_value < PROTECTED_CHARSET_POSITION)
         char_value = (char_value + layer->offset) % PROTECTED_CHARSET_POSITION;
-
-      if(bg_color >= 16)
-        bg_color = (bg_color & 0xF) + graphics->protected_pal_position;
-
-      if(fg_color >= 16)
-        fg_color = (fg_color & 0xF) + graphics->protected_pal_position;
     }
     else
     {
-      bg_color = FULL_PAL_SIZE;
-      fg_color = FULL_PAL_SIZE;
+      bg_color = PAL_SIZE + PROTECTED_PAL_SIZE;
+      fg_color = PAL_SIZE + PROTECTED_PAL_SIZE;
+      subpalette = FULL_PAL_SIZE;
     }
 
-    *dest =
-     (char_value << LAYER_CHAR_POS) |
-     (bg_color << LAYER_BG_POS) |
-     (fg_color << LAYER_FG_POS);
+    if(layer->mode == 0)
+      *dest = gl_pack_u32((char_value << LAYER_CHAR_POS) |
+       (bg_color << LAYER_BG_POS) | (fg_color << LAYER_FG_POS));
+    else
+      *dest = gl_pack_u32((char_value << LAYER_CHAR_POS) |
+       (subpalette << LAYER_SUBPALETTE_POS));
   }
 
   glsl.glBindTexture(GL_TEXTURE_2D, render_data->textures[TEX_DATA_ID]);
@@ -1014,32 +1224,44 @@ static void glsl_render_layer(struct graphics_data *graphics,
    GL_RGBA, GL_UNSIGNED_BYTE, render_data->background_texture);
   gl_check_error();
 
-  colorptr = graphics->flat_intensity_palette;
-  dest = render_data->background_texture;
-
-  for(i = 0; i < graphics->protected_pal_position + 16; i++, dest++, colorptr++)
-    *dest = *colorptr;
-
   // Palette
-  if(layer->transparent_col != -1)
-    render_data->background_texture[layer->transparent_col] = 0x00000000;
-  render_data->background_texture[FULL_PAL_SIZE] = 0x00000000;
+  if(render_data->dirty_palette ||
+   render_data->last_tcol != layer->transparent_col)
+  {
+    unsigned int transparent = graphics->protected_pal_position + PROTECTED_PAL_SIZE;
+    render_data->dirty_palette = false;
+    render_data->last_tcol = layer->transparent_col;
 
-  glsl.glTexSubImage2D(GL_TEXTURE_2D, 0,
-   TEX_DATA_PAL_X, TEX_DATA_PAL_Y, FULL_PAL_SIZE + 1, 1,
-   GL_RGBA, GL_UNSIGNED_BYTE, render_data->background_texture);
-  gl_check_error();
+    colorptr = graphics->flat_intensity_palette;
+    dest = render_data->background_texture;
+
+    for(i = 0; i < graphics->protected_pal_position + PROTECTED_PAL_SIZE; i++)
+      dest[i] = colorptr[i];
+
+    if(layer->transparent_col != -1)
+      render_data->background_texture[layer->transparent_col] = 0x00000000;
+    render_data->background_texture[transparent] = 0x00000000;
+
+    glsl.glTexSubImage2D(GL_TEXTURE_2D, 0,
+     TEX_DATA_PAL_X, TEX_DATA_PAL_Y, FULL_PAL_SIZE + 1, 1,
+     GL_RGBA, GL_UNSIGNED_BYTE, render_data->background_texture);
+    gl_check_error();
+  }
 
   // Indices
-  dest = render_data->background_texture;
-  for(i = 0; i < 4; i++)
-    for(j = 0; j < SMZX_PAL_SIZE; j++, dest++)
-      *dest = graphics->smzx_indices[j * 4 + i];
+  if(render_data->dirty_indices && layer->mode)
+  {
+    render_data->dirty_indices = false;
+    dest = render_data->background_texture;
+    for(i = 0; i < 4; i++)
+      for(j = 0; j < SMZX_PAL_SIZE; j++, dest++)
+        *dest = gl_pack_u32(graphics->smzx_indices[j * 4 + i]);
 
-  glsl.glTexSubImage2D(GL_TEXTURE_2D, 0,
-   TEX_DATA_IDX_X, TEX_DATA_IDX_Y, SMZX_PAL_SIZE, 4,
-   GL_RGBA, GL_UNSIGNED_BYTE, render_data->background_texture);
-  gl_check_error();
+    glsl.glTexSubImage2D(GL_TEXTURE_2D, 0,
+     TEX_DATA_IDX_X, TEX_DATA_IDX_Y, SMZX_PAL_SIZE, 4,
+     GL_RGBA, GL_UNSIGNED_BYTE, render_data->background_texture);
+    gl_check_error();
+  }
 
   glsl.glEnableVertexAttribArray(ATTRIB_POSITION);
   glsl.glEnableVertexAttribArray(ATTRIB_TEXCOORD);
@@ -1063,8 +1285,8 @@ static void glsl_render_layer(struct graphics_data *graphics,
   glsl.glDisable(GL_BLEND);
 }
 
-static void glsl_render_cursor(struct graphics_data *graphics,
- Uint32 x, Uint32 y, Uint16 color, Uint8 lines, Uint8 offset)
+static void glsl_render_cursor(struct graphics_data *graphics, unsigned int x,
+ unsigned int y, uint16_t color, unsigned int lines, unsigned int offset)
 {
   struct glsl_render_data *render_data = graphics->render_data;
   GLubyte *pal_base = &render_data->palette[color * 3];
@@ -1090,7 +1312,12 @@ static void glsl_render_cursor(struct graphics_data *graphics,
     pal_base[0]/255.0f, pal_base[1]/255.0f, pal_base[2]/255.0f,
   };
 
-  glsl.glDisable(GL_TEXTURE_2D);
+  if(render_data->use_software_renderer)
+  {
+    render_cursor(render_data->pixels, SCREEN_PIX_W * 4, 32, x, y,
+     graphics->flat_intensity_palette[color], lines, offset);
+    return;
+  }
 
   glsl.glUseProgram(render_data->cursor_program);
   gl_check_error();
@@ -1114,7 +1341,7 @@ static void glsl_render_cursor(struct graphics_data *graphics,
 }
 
 static void glsl_render_mouse(struct graphics_data *graphics,
- Uint32 x, Uint32 y, Uint8 w, Uint8 h)
+ unsigned int x, unsigned int y, unsigned int w, unsigned int h)
 {
   struct glsl_render_data *render_data = graphics->render_data;
 
@@ -1128,6 +1355,13 @@ static void glsl_render_mouse(struct graphics_data *graphics,
     x2 * 2.0f / SCREEN_PIX_W - 1.0f, (y  * 2.0f / SCREEN_PIX_H - 1.0f) * -1.0f,
     x2 * 2.0f / SCREEN_PIX_W - 1.0f, (y2 * 2.0f / SCREEN_PIX_H - 1.0f) * -1.0f,
   };
+
+  if(render_data->use_software_renderer)
+  {
+    render_mouse(render_data->pixels, SCREEN_PIX_W * 4, 32, x, y, 0xFFFFFFFF,
+     0x0, w, h);
+    return;
+  }
 
   glsl.glEnable(GL_BLEND);
   glsl.glBlendFunc(GL_ONE_MINUS_DST_COLOR, GL_ZERO);
@@ -1180,9 +1414,34 @@ static void glsl_sync_screen(struct graphics_data *graphics)
   glsl.glBindTexture(GL_TEXTURE_2D, render_data->textures[TEX_SCREEN_ID]);
   gl_check_error();
 
-  glsl.glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 0, 0,
-   GL_POWER_2_WIDTH, GL_POWER_2_HEIGHT, 0);
-  gl_check_error();
+  if(render_data->use_software_renderer)
+  {
+    // Screen data was software rendered to the pixels buffer.
+    // Stream it to the screen texture.
+    glsl.glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SCREEN_PIX_W, SCREEN_PIX_H,
+     GL_RGBA, GL_UNSIGNED_BYTE, render_data->pixels);
+    width = SCREEN_PIX_W;
+    height = SCREEN_PIX_H;
+    gl_check_error();
+  }
+  else
+
+  if(!glsl.has_fbo)
+  {
+    // If FBOs are enabled, the screen was rendered to the screen texture
+    // and nothing extra needs to be done here. If FBOs are not enabled, then
+    // the screen needs to be copied to the texture off the window framebuffer.
+    glsl.glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 0, 0,
+     GL_POWER_2_WIDTH, GL_POWER_2_HEIGHT, 0);
+    gl_check_error();
+  }
+
+  if(glsl.has_fbo)
+  {
+    // Select the screen framebuffer to draw the scaled screen to.
+    glsl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl_check_error();
+  }
 
   glsl.glClear(GL_COLOR_BUFFER_BIT);
   gl_check_error();
@@ -1195,13 +1454,25 @@ static void glsl_sync_screen(struct graphics_data *graphics)
   gl_check_error();
 
   {
-    const float tex_coord_array_single[2 * 4] =
+    const float width_f = width / (1.0f * GL_POWER_2_WIDTH);
+    const float height_f = height / (1.0f * GL_POWER_2_HEIGHT);
+    const float tex_coord_array_single_hardware[2 * 4] =
     {
-      0.0f,                              height / (1.0f * GL_POWER_2_HEIGHT),
-      0.0f,                              0.0f,
-      width / (1.0f * GL_POWER_2_WIDTH), height / (1.0f * GL_POWER_2_HEIGHT),
-      width / (1.0f * GL_POWER_2_WIDTH), 0.0f,
+      0.0f,     height_f,
+      0.0f,     0.0f,
+      width_f,  height_f,
+      width_f,  0.0f,
     };
+    // The software rendered origin is at the top (rather than the bottom).
+    const float tex_coord_array_single_software[2 * 4] =
+    {
+      0.0f,     0.0f,
+      0.0f,     height_f,
+      width_f,  0.0f,
+      width_f,  height_f,
+    };
+    const float *tex_coord_array_single = render_data->use_software_renderer ?
+     tex_coord_array_single_software : tex_coord_array_single_hardware;
 
     glsl.glVertexAttribPointer(ATTRIB_TEXCOORD, 2, GL_FLOAT, GL_FALSE, 0,
      tex_coord_array_single);
@@ -1214,36 +1485,60 @@ static void glsl_sync_screen(struct graphics_data *graphics)
   glsl.glDisableVertexAttribArray(ATTRIB_POSITION);
   glsl.glDisableVertexAttribArray(ATTRIB_TEXCOORD);
 
-  glsl.glBindTexture(GL_TEXTURE_2D, render_data->textures[TEX_DATA_ID]);
-  gl_check_error();
+  if(!render_data->use_software_renderer)
+  {
+    glsl.glBindTexture(GL_TEXTURE_2D, render_data->textures[TEX_DATA_ID]);
+    gl_check_error();
+  }
+
+  if(glsl.has_fbo)
+  {
+    glsl.glBindFramebuffer(GL_FRAMEBUFFER, render_data->fbos[FBO_SCREEN_TEX]);
+    gl_check_error();
+
+    // Clear the framebuffer so elements of this frame don't bleed through.
+    glsl.glClear(GL_COLOR_BUFFER_BIT);
+    gl_check_error();
+  }
 
   gl_swap_buffers(graphics);
+  render_data->dirty_palette = true;
+  render_data->dirty_indices = true;
 
-#ifndef __EMSCRIPTEN__
-  glsl.glClear(GL_COLOR_BUFFER_BIT);
-  gl_check_error();
-#endif
+  /**
+   * When FBOs are not available, the next window frame needs to be cleared
+   * since the screen will be temporarily drawn there before scaling. This call
+   * was previously disabled for Emscripten (which should always have FBOs).
+   */
+  if(!glsl.has_fbo)
+  {
+    glsl.glClear(GL_COLOR_BUFFER_BIT);
+    gl_check_error();
+  }
 }
 
-static void glsl_switch_shader(struct graphics_data *graphics,
+static boolean glsl_switch_shader(struct graphics_data *graphics,
  const char *name)
 {
   struct glsl_render_data *render_data = graphics->render_data;
   int index = GLSL_SHADER_SCALER_VERT - GLSL_SHADER_RES_FIRST;
 
-  if(source_cache[index]) free(source_cache[index]);
+  free(source_cache[index]);
   source_cache[index] = NULL;
 
   index = GLSL_SHADER_SCALER_FRAG - GLSL_SHADER_RES_FIRST;
-  if(source_cache[index]) free(source_cache[index]);
+  free(source_cache[index]);
   source_cache[index] = NULL;
 
-  strncpy(graphics->gl_scaling_shader, name, 32);
-  graphics->gl_scaling_shader[31] = 0;
+  glsl_set_scaling_shader(graphics, name);
 
   glsl.glDeleteProgram(render_data->scaler_program);
   gl_check_error();
 
+  /**
+   * If the user-specified shader fails to load, this will fall back to the
+   * default scaling shader.
+   */
   render_data->scaler_program = glsl_load_program(graphics,
    GLSL_SHADER_SCALER_VERT, GLSL_SHADER_SCALER_FRAG);
   if(render_data->scaler_program)
@@ -1256,6 +1551,7 @@ static void glsl_switch_shader(struct graphics_data *graphics,
     glsl_verify_link(render_data, render_data->scaler_program);
     glsl_delete_shaders(render_data->scaler_program);
   }
+  return !glsl_scaling_shader_is_default(graphics);
 }
 
 void render_glsl_register(struct renderer *renderer)
@@ -1263,7 +1559,6 @@ void render_glsl_register(struct renderer *renderer)
   memset(renderer, 0, sizeof(struct renderer));
   renderer->init_video = glsl_init_video;
   renderer->free_video = glsl_free_video;
-  renderer->check_video_mode = gl_check_video_mode;
   renderer->set_video_mode = glsl_set_video_mode;
   renderer->update_colors = glsl_update_colors;
   renderer->resize_screen = resize_screen_standard;
@@ -1277,6 +1572,12 @@ void render_glsl_register(struct renderer *renderer)
   renderer->render_mouse = glsl_render_mouse;
   renderer->sync_screen = glsl_sync_screen;
   renderer->switch_shader = glsl_switch_shader;
+}
+
+void render_glsl_software_register(struct renderer *renderer)
+{
+  render_glsl_register(renderer);
+  renderer->set_video_mode = glsl_software_set_video_mode;
 }
 
 void render_auto_glsl_register(struct renderer *renderer)

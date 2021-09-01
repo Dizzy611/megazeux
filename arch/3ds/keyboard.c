@@ -19,9 +19,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "../../src/graphics.h"
-#include "../../src/render.h"
-#include "../../src/renderers.h"
+#include "../../src/event.h"
 #include "../../src/util.h"
 
 #include <3ds.h>
@@ -29,6 +27,7 @@
 
 #include "event.h"
 #include "keyboard.h"
+#include "platform.h"
 #include "render.h"
 
 #define MAX_KEYS_DOWN 8
@@ -146,7 +145,7 @@ void ctr_keyboard_init(struct ctr_render_data *render_data)
 
 void ctr_keyboard_draw(struct ctr_render_data *render_data)
 {
-  Uint32 i, j;
+  size_t i, j;
 
   ctr_draw_2d_texture(render_data, keyboard_tex, 0, 0, 320, 240, 0, 0, 320, 240,
    4.0f, 0xffffffff, false);
@@ -155,6 +154,12 @@ void ctr_keyboard_draw(struct ctr_render_data *render_data)
   {
     ctr_draw_2d_texture(render_data, keyboard_tex, force_zoom_out ? 16 : 0, 240,
      16, 16, 302, 2, 16, 16, 3.0f, 0xffffffff, false);
+  }
+
+  if(ctr_supports_wide())
+  {
+    ctr_draw_2d_texture(render_data, keyboard_tex, gfxIsWide() ? 48 : 32, 240,
+     16, 16, 284, 2, 16, 16, 3.0f, 0xffffffff, false);
   }
 
   if(keys_down_count > 0)
@@ -177,57 +182,12 @@ void ctr_keyboard_draw(struct ctr_render_data *render_data)
   }
 }
 
-static enum keycode convert_internal_unicode(enum keycode key)
-{
-  if(key >= 32 && key <= 126)
-  {
-    if(get_shift_status(keycode_internal))
-    {
-      if((key >= IKEY_a) && (key <= IKEY_z))
-        return (key - 32);
-
-      // TODO based on a US keyboard right now since that's as good as any
-      // default and possibly what most users are going to expect. It would
-      // be nice to have more locales at some point if someone requests them.
-      switch(key)
-      {
-        case IKEY_BACKQUOTE:    return '~';
-        case IKEY_1:            return '!';
-        case IKEY_2:            return '@';
-        case IKEY_3:            return '#';
-        case IKEY_4:            return '$';
-        case IKEY_5:            return '%';
-        case IKEY_6:            return '^';
-        case IKEY_7:            return '&';
-        case IKEY_8:            return '*';
-        case IKEY_9:            return '(';
-        case IKEY_0:            return ')';
-        case IKEY_MINUS:        return '_';
-        case IKEY_EQUALS:       return '+';
-        case IKEY_LEFTBRACKET:  return '{';
-        case IKEY_RIGHTBRACKET: return '}';
-        case IKEY_BACKSLASH:    return '|';
-        case IKEY_SEMICOLON:    return ':';
-        case IKEY_QUOTE:        return '"';
-        case IKEY_COMMA:        return '<';
-        case IKEY_PERIOD:       return '>';
-        case IKEY_SLASH:        return '?';
-        default:                return IKEY_UNKNOWN;
-      }
-    }
-
-    return key;
-  }
-
-  return IKEY_UNKNOWN;
-}
-
 boolean ctr_keyboard_update(struct buffered_status *status)
 {
   touchPosition pos;
-  Uint32 down, up, i;
+  u32 down, up, i;
   boolean retval = false;
-  enum keycode unicode;
+  u32 unicode;
 
   if(get_bottom_screen_mode() != BOTTOM_SCREEN_MODE_KEYBOARD)
     return retval;
@@ -243,15 +203,22 @@ boolean ctr_keyboard_update(struct buffered_status *status)
     {
       force_zoom_out = !force_zoom_out;
     }
+    else if(ctr_supports_wide() && pos.px >= 284 && pos.py >= 2 &&
+     pos.px < 300 && pos.py < 18)
+    {
+      ctr_request_set_wide(!gfxIsWide());
+    }
 
     for(i = 0; i < touch_areas_len; i++)
     {
       touch_area_t *area = &touch_areas[i];
       if(ctr_key_touched(&pos, area))
       {
-        unicode = convert_internal_unicode(area->keycode);
+        unicode = convert_internal_unicode(area->keycode, false);
 
-        key_press(status, area->keycode, unicode);
+        key_press(status, area->keycode);
+        key_press_unicode(status, unicode, true);
+
         keys_down[keys_down_count++] = area->keycode;
         retval = true;
         break;

@@ -203,6 +203,17 @@ struct board_list
   int *result;
 };
 
+struct slot_selector
+{
+  struct element e;
+  const char *title;
+  int num_slots;
+  boolean *highlighted_slots;
+  boolean *disabled_slots;
+  int selected_slot;
+  int save;
+};
+
 struct file_selector
 {
   struct element e;
@@ -214,6 +225,20 @@ struct file_selector
   int allow_unset;
   int return_value;
   char *result;
+};
+
+enum allow_dirs
+{
+  NO_DIRS,
+  ALLOW_ALL_DIRS,
+  ALLOW_SUBDIRS,
+};
+
+enum allow_new
+{
+  NO_NEW_FILES,
+  ALLOW_NEW_FILES,
+  ALLOW_WILDCARD_FILES,
 };
 
 CORE_LIBSPEC int input_window(struct world *mzx_world, const char *title,
@@ -229,6 +254,9 @@ CORE_LIBSPEC struct element *construct_radio_button(int x, int y,
  const char **choices, int num_choices, int max_length, int *result);
 CORE_LIBSPEC struct element *construct_button(int x, int y, const char *label,
  int return_value);
+CORE_LIBSPEC struct element *construct_slot_selector(int x, int y,
+ const char *title, int num_slots, boolean *highlighted_slots,
+ boolean *disabled_slots, int default_slot, int save);
 CORE_LIBSPEC struct element *construct_number_box(int x, int y,
  const char *question, int lower_limit, int upper_limit,
  enum number_box_type type, int *result);
@@ -243,10 +271,11 @@ CORE_LIBSPEC struct element *construct_list_box(int x, int y,
  boolean respect_color_codes);
 
 CORE_LIBSPEC int choose_file_ch(struct world *mzx_world,
- const char *const *wildcards, char *ret, const char *title, int dirs_okay);
+ const char *const *wildcards, char *ret, const char *title,
+ enum allow_dirs allow_dirs);
 CORE_LIBSPEC int new_file(struct world *mzx_world,
  const char *const *wildcards, const char *default_ext, char *ret,
- const char *title, int dirs_okay);
+ const char *title, enum allow_dirs allow_dirs);
 
 #if defined(CONFIG_UPDATER) || defined(CONFIG_LOADSAVE_METER)
 CORE_LIBSPEC void meter(const char *title, unsigned int progress,
@@ -296,6 +325,14 @@ CORE_LIBSPEC void meter_interior(unsigned int progress, unsigned int out_of);
 #define DI_DEBUG_LABEL        DI_INPUT_BOX_LABEL
 #define DI_DEBUG_NUMBER       79
 
+#define DI_SLOTSEL_NORMAL     8
+#define DI_SLOTSEL_HIGHLIGHT  10
+#define DI_SLOTSEL_DISABLE    128
+
+#define SLOTSEL_OK_RESULT           0
+#define SLOTSEL_CANCEL_RESULT       -1
+#define SLOTSEL_FILE_MANAGER_RESULT -2
+
 #define arrow_char '\x10'
 #define pc_top_arrow '\x1E'
 #define pc_bottom_arrow '\x1F'
@@ -304,6 +341,8 @@ CORE_LIBSPEC void meter_interior(unsigned int progress, unsigned int out_of);
 #define pc_meter 219
 
 CORE_LIBSPEC int run_dialog(struct world *mzx_world, struct dialog *di);
+CORE_LIBSPEC int slot_manager(struct world *mzx_world, char *ret,
+ const char *title, boolean save);
 
 #ifdef CONFIG_EDITOR
 CORE_LIBSPEC void construct_element(struct element *e, int x, int y,
@@ -333,7 +372,7 @@ CORE_LIBSPEC int char_select_next_tile(int current_char,
 
 CORE_LIBSPEC int file_manager(struct world *mzx_world,
  const char *const *wildcards, const char *default_ext, char *ret,
- const char *title, int dirs_okay, int allow_new,
+ const char *title, enum allow_dirs allow_dirs, enum allow_new allow_new,
  struct element **dialog_ext, int num_ext, int ext_height);
 #endif // CONFIG_EDITOR
 

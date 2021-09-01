@@ -28,6 +28,7 @@
 #include "../core.h"
 #include "../event.h"
 #include "../graphics.h"
+#include "../platform.h"
 #include "../intake.h"
 #include "../window.h"
 
@@ -74,6 +75,7 @@ int list_menu(const char *const *choices, int choice_size, const char *title,
   int joystick_key;
   int key;
   int i;
+  int j;
 
   cursor_off();
 
@@ -91,7 +93,7 @@ int list_menu(const char *const *choices, int choice_size, const char *title,
     // Add title
     write_string(title, xpos + 3, ypos + 2, DI_TITLE, 0);
     draw_char(' ', DI_TITLE, xpos + 2, ypos + 2);
-    draw_char(' ', DI_TITLE, xpos + 3 + (Uint32)strlen(title), ypos + 2);
+    draw_char(' ', DI_TITLE, xpos + 3 + (unsigned int)strlen(title), ypos + 2);
   }
 
   // Add pointer
@@ -112,6 +114,7 @@ int list_menu(const char *const *choices, int choice_size, const char *title,
 
     // Draw current
     color_string(choices[current], xpos + 4, (ypos >> 1) + 12, DI_ACTIVE);
+    cursor_hint(xpos + 4, ypos / 2 + 12);
 
     // Draw above current
     for(i = 1; i < 9 - (ypos >> 1); i++)
@@ -293,11 +296,10 @@ int list_menu(const char *const *choices, int choice_size, const char *title,
 
       default:
       {
-        // Not necessarily invalid. Might be an alphanumeric; seek the
-        // sucker.
+        int key_char = get_key(keycode_text_ascii);
 
-        if(((key >= IKEY_a) && (key <= IKEY_z)) ||
-         ((key >= IKEY_0) && (key <= IKEY_9)))
+        if(!get_alt_status(keycode_internal) &&
+         !get_ctrl_status(keycode_internal) && (key_char >= 32))
         {
           ticks = get_ticks();
           if(((ticks - last_keypress_time) >= TIME_SUSPEND) ||
@@ -308,18 +310,31 @@ int list_menu(const char *const *choices, int choice_size, const char *title,
           }
           last_keypress_time = ticks;
 
-          key_buffer[key_position] = key;
+          key_buffer[key_position] = key_char;
           key_position++;
           key_buffer[key_position] = 0;
 
-          if(get_shift_status(keycode_internal))
+          if(key_buffer[0] == ' ')
           {
+            const char *key_buffer_nospace = key_buffer;
+
+            // Skip prefixed spaces for the buffer...
+            while(*key_buffer_nospace == ' ')
+              key_buffer_nospace++;
+
+            if(!key_buffer_nospace[0])
+              break;
+
             for(i = 0; i < num_choices; i++)
             {
-              if((choices[i][0] == ' ') &&
-               !strncasecmp(choices[i] + 1, key_buffer, key_position))
+              // Skip prefixed spaces for the choices...
+              j = 0;
+              while(choices[i][j] == ' ')
+                j++;
+
+              if(!strncasecmp(choices[i] + j, key_buffer_nospace,
+               strlen(key_buffer_nospace)))
               {
-                // It's good!
                 current = i;
                 break;
               }
@@ -331,7 +346,6 @@ int list_menu(const char *const *choices, int choice_size, const char *title,
             {
               if(!strncasecmp(choices[i], key_buffer, key_position))
               {
-                // It's good!
                 current = i;
                 break;
               }
@@ -346,6 +360,7 @@ int list_menu(const char *const *choices, int choice_size, const char *title,
     if(exit)
     {
       restore_screen();
+      cursor_off();
       if(current == 0)
         return -32767;
       else
@@ -469,6 +484,7 @@ int color_selection(int current, int allow_wild)
     // Add selection box
     draw_window_box(currx + 14, curry + 3, currx + 16,
      curry + 5, DI_MAIN, DI_MAIN, DI_MAIN, 0, 0);
+    cursor_hint(currx + 15, curry + 4);
 
     // Write number of color
     if((allow_wild) && ((currx == 16) || (curry == 16)))
@@ -536,6 +552,7 @@ int color_selection(int current, int allow_wild)
         pop_context();
         // Selected
         restore_screen();
+        cursor_off();
         if((allow_wild) && ((currx == 16) || (curry == 16)))
         {
           // Convert wild
@@ -776,6 +793,7 @@ static void draw_check_box(struct world *mzx_world, struct dialog *di,
   {
     color_line(src->max_length + 4, x, y + src->current_choice,
      DI_ACTIVE);
+    cursor_hint(x + 1, y + src->current_choice);
   }
 }
 
@@ -789,6 +807,8 @@ static void draw_char_box(struct world *mzx_world, struct dialog *di,
   int question_len = (int)strlen(src->question) + di->pad_space;
 
   write_string(src->question, x, y, color, 0);
+  if(active)
+    cursor_hint(x, y);
 
   // Special case: display for char ID value 255 custom behavior
   if((result == 255) && !(src->allow_char_255))
@@ -818,6 +838,9 @@ static void draw_color_box_element(struct world *mzx_world, struct dialog *di,
   write_string(src->question, x, y, color, 0);
   draw_color_box(current_color & 0xFF, current_color >> 8,
    x + (int)strlen(src->question) + di->pad_space, y, 80);
+
+  if(active)
+    cursor_hint(x, y);
 }
 
 static void draw_board_list(struct world *mzx_world, struct dialog *di,
@@ -847,6 +870,8 @@ static void draw_board_list(struct world *mzx_world, struct dialog *di,
 
   write_string(src->title, x, y, color, 0);
   fill_line(BOARD_NAME_SIZE + 1, x, y + 1, 32, DI_LIST);
+  if(active)
+    cursor_hint(x, y);
 
   color_string(board_name, x + 1, y + 1, DI_LIST);
 
@@ -937,7 +962,7 @@ static int key_char_box(struct world *mzx_world, struct dialog *di,
 
     default:
     {
-      int key_char = get_key(keycode_unicode);
+      int key_char = get_key(keycode_text_ascii);
 
       if(key_char >= 32)
       {
@@ -1101,7 +1126,7 @@ int add_board(struct world *mzx_world, int current)
 {
   struct board *new_board;
   char name[BOARD_NAME_SIZE];
-  name[0] = 0;
+  memset(name, 0, BOARD_NAME_SIZE);
 
   if(input_window(mzx_world, "Name for new board:", name, BOARD_NAME_SIZE - 1))
     return -1;
@@ -1194,8 +1219,8 @@ int choose_board(struct world *mzx_world, int current, const char *title,
 }
 
 int choose_file(struct world *mzx_world, const char *const *wildcards,
- char *ret, const char *title, int dirs_okay)
+ char *ret, const char *title, enum allow_dirs allow_dirs)
 {
-  return file_manager(mzx_world, wildcards, NULL, ret, title, dirs_okay,
-   0, NULL, 0, 0);
+  return file_manager(mzx_world, wildcards, NULL, ret, title, allow_dirs,
+   NO_NEW_FILES, NULL, 0, 0);
 }

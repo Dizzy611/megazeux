@@ -3,22 +3,27 @@
  *
  * Copyright (C) 2018, 2019 Adrian Siekierka
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of
- * the License, or (at your option) any later version.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 import { getIndexedDB, getLocalStorage, drawErrorMessage, xhrFetchAsArrayBuffer } from "./util";
+import { zip } from "./zip.js";
 
 function filterKeys(list, filter) {
 	if (filter == null) return list;
@@ -60,6 +65,12 @@ class InMemoryStorage {
 		this.map[key] = value;
 		return true;
 	}
+
+	remove(key) {
+		if (this.readonly) return false;
+		delete this.map[key];
+		return true;
+	}
 }
 
 class CompositeStorage {
@@ -98,10 +109,17 @@ class CompositeStorage {
 	}
 
 	set(key, value) {
-		let promise = Promise.resolve(false);
 		for (var p = this.providers.length - 1; p >= 0; p--) {
 			let provider = this.providers[p];
 			if (provider.set(key, value)) return true;
+		}
+		return false;
+	}
+
+	remove(key) {
+		for (var p = this.providers.length - 1; p >= 0; p--) {
+			let provider = this.providers[p];
+			if (provider.remove(key)) return true;
 		}
 		return false;
 	}
@@ -139,6 +157,15 @@ class AsyncStorageWrapper extends InMemoryStorage {
 			return false;
 		}
 	}
+
+	remove(key) {
+		if (super.remove(key)) {
+			this.parent.remove(key);
+			return true;
+		} else {
+			return false;
+		}
+	}
 }
 
 class BrowserBackedStorage {
@@ -153,7 +180,7 @@ class BrowserBackedStorage {
 
 	get(key) {
 		const result = this.storage.getItem(this.prefix + key);
-		if (result) {
+		if (result !== null) {
 			return result.split(",").map(s => parseInt(s));
 		} else {
 			return null;
@@ -173,6 +200,11 @@ class BrowserBackedStorage {
 
 	set(key, value) {
 		this.storage.setItem(this.prefix + key, value.join(","));
+		return true;
+	}
+
+	remove(key) {
+		this.storage.removeItem(this.prefix + key);
 		return true;
 	}
 }
@@ -196,7 +228,7 @@ class IndexedDbBackedAsyncStorage {
 				resolve();
 			}
 			dbRequest.onerror = event => {
-				reject();
+				reject("Failed to open IndexedDB database (is this a private window?)");
 			}
 		});
 	}
@@ -222,12 +254,35 @@ class IndexedDbBackedAsyncStorage {
 	list(filter) {
 		const transaction = this.database.transaction(["files"], "readonly");
 		return new Promise((resolve, reject) => {
-			const request = transaction.objectStore("files").getAllKeys();
-			request.onsuccess = event => {
-				resolve(filterKeys(request.result, filter));
-			}
-			request.onerror = event => {
-				resolve([]);
+			const store = transaction.objectStore("files");
+			if (typeof store.getAllKeys === 'function') {
+				const request = store.getAllKeys();
+				request.onsuccess = event => {
+					resolve(filterKeys(request.result, filter));
+				}
+				request.onerror = event => {
+					resolve([]);
+				}
+			} else {
+				var result = [];
+				var request;
+				if (typeof store.openKeyCursor === 'function') {
+					request = store.openKeyCursor();
+				} else {
+					request = store.openCursor();
+				}
+				request.onsuccess = event => {
+					var cursor = event.target.result;
+					if (cursor) {
+						result.push(cursor.key);
+						cursor.continue();
+					} else {
+						resolve(filterKeys(result, filter));
+					}
+				}
+				request.onerror = event => {
+					resolve(result);
+				}
 			}
 		});
 	}
@@ -239,6 +294,19 @@ class IndexedDbBackedAsyncStorage {
 				"filename": key,
 				"value": value
 			});
+			request.onsuccess = event => {
+				resolve(true);
+			}
+			request.onerror = event => {
+				resolve(false);
+			}
+		});
+	}
+
+	remove(key) {
+		const transaction = this.database.transaction(["files"], "readwrite");
+		return new Promise((resolve, reject) => {
+			const request = transaction.objectStore("files").delete(key);
 			request.onsuccess = event => {
 				resolve(true);
 			}
@@ -281,9 +349,12 @@ export function createZipStorage(url, options, progressCallback) {
 			let files;
 			let fileMap = {};
 
-			try {
-				files = UZIP.parse(xhr.response);
-			} catch (e) {
+			try
+			{
+				files = zip.extract(xhr.response);
+			}
+			catch(e)
+			{
 				reject(e);
 				return;
 			}

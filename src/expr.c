@@ -29,6 +29,7 @@
 #include "rasm.h"
 #include "robot.h"
 #include "str.h"
+#include "util.h"
 #include "world.h"
 #include "world_struct.h"
 
@@ -54,6 +55,191 @@ enum op
   OP_NOT_EQUAL,
   OP_TERNARY
 };
+
+#ifdef CONFIG_DEBYTECODE
+// Forward declaration for recursion...
+static inline char *skip_identifier(char *expression, char terminator);
+
+/**
+ * Skip string interpolation brackets.
+ */
+static inline char *skip_string_interpolation(char *expression)
+{
+  char current_char;
+
+  while(1)
+  {
+    current_char = *expression;
+    expression++;
+
+    if(current_char == '\0')
+    {
+      return expression - 1;
+    }
+    else
+
+    if(current_char == '>')
+    {
+      break;
+    }
+    else
+
+    if(current_char == '`')
+    {
+      expression = skip_identifier(expression, current_char);
+    }
+  }
+  return expression;
+}
+#endif
+
+/**
+ * Skip an expression wrapped in parentheses.
+ */
+static inline char *skip_expression(char *expression)
+{
+  char current_char;
+  int level = 0;
+
+  while(1)
+  {
+    current_char = *expression;
+    expression++;
+
+    if(current_char == '\0')
+    {
+      return expression - 1;
+    }
+    else
+
+    if(current_char == '(')
+    {
+      level++;
+    }
+    else
+
+    if(current_char == ')')
+    {
+      if(level <= 0)
+        break;
+
+      level--;
+    }
+  }
+  return expression;
+}
+
+/**
+ * Skip an identifier.
+ */
+static inline char *skip_identifier(char *expression, char terminator)
+{
+  char current_char;
+
+  while(1)
+  {
+    current_char = *expression;
+    expression++;
+
+    if(current_char == '\0')
+    {
+      return expression - 1;
+    }
+    else
+
+    if(current_char == '(')
+    {
+      expression = skip_expression(expression);
+    }
+    else
+
+#ifdef CONFIG_DEBYTECODE
+    if(current_char == '<')
+    {
+      expression = skip_string_interpolation(expression);
+    }
+    else
+#endif
+
+    if(current_char == terminator)
+      break;
+  }
+  return expression;
+}
+
+/**
+ * Parse the current expression level until the terminator is found, skipping
+ * the contents of identifiers and nested expressions. If the terminator char
+ * is not found, returns false. This is pretty dumb, but still faster than
+ * actually running the expression.
+ */
+static inline boolean ternary_short_circuit(char **_expression, char terminator,
+ int *error)
+{
+  char *expression = *_expression;
+  char current_char;
+  int ternary_level = 0;
+
+  while(1)
+  {
+    current_char = *expression;
+    expression++;
+
+    // Only allow termination if a nested ternary expression hasn't started...
+    if(current_char == terminator && !ternary_level)
+    {
+      *_expression = expression;
+      return true;
+    }
+
+    if(current_char == '\0')
+    {
+      break;
+    }
+    else
+
+    if(current_char == '(')
+    {
+      expression = skip_expression(expression);
+    }
+    else
+
+    if(current_char == ')')
+    {
+      break;
+    }
+    else
+
+    if(current_char == '?')
+    {
+      ternary_level++;
+    }
+    else
+
+    if(current_char == ':')
+    {
+      if(ternary_level <= 0)
+        break;
+
+      ternary_level--;
+    }
+    else
+
+    // The main concern here is reserved chars being found in identifiers.
+    // The affected identifiers should always have quotes, though.
+#ifdef CONFIG_DEBYTECODE
+    if(current_char == '`')
+#else
+    if(current_char == '&' || current_char == '\'')
+#endif
+    {
+      expression = skip_identifier(expression, current_char);
+    }
+  }
+  if(error)
+    *error = 2;
+  return false;
+}
 
 #ifndef CONFIG_DEBYTECODE
 
@@ -357,14 +543,15 @@ int parse_expression(struct world *mzx_world, char **_expression, int *error,
     // Interpolate a counter or string
     if(state & EXPR_STATE_INTERPOLATING)
     {
-      int len;
-      char *src;
+      const char *src;
+      size_t len;
       buf_pos = buffer + buf_start;
 
       // Input
       if(!memcasecmp(buf_pos, "INPUT", 6))
       {
         src = mzx_world->current_board->input_string;
+        src = src ? src : "";
         len = strlen(src);
       }
       else
@@ -385,11 +572,8 @@ int parse_expression(struct world *mzx_world, char **_expression, int *error,
       // #(counter) is a hex representation.
       if(*buf_pos == '+')
       {
-        sprintf(number_buffer, "%x",
-         get_counter(mzx_world, buf_pos + 1, id));
-
-        src = number_buffer;
-        len = strlen(number_buffer);
+        src = tr_int_to_hex_string(number_buffer,
+         get_counter(mzx_world, buf_pos + 1, id), &len);
       }
       else
 
@@ -403,17 +587,14 @@ int parse_expression(struct world *mzx_world, char **_expression, int *error,
       }
       else
       {
-        sprintf(number_buffer, "%d",
-         get_counter(mzx_world, buf_pos, id));
-
-        src = number_buffer;
-        len = strlen(number_buffer);
+        src = tr_int_to_string(number_buffer,
+         get_counter(mzx_world, buf_pos, id), &len);
       }
 
       // Pop before writing to remove the unary null terminator
       POP_STACK(true);
 
-      if(len > (buf_alloc - buf_pos))
+      if((ptrdiff_t)len > (buf_alloc - buf_pos))
       {
         // Truncate the interpolated value and continue
         len = buf_alloc - buf_pos;
@@ -472,27 +653,12 @@ int parse_expression(struct world *mzx_world, char **_expression, int *error,
         break;
 
       case OP_DIVISION:
-      {
-        if(operand_b == 0)
-          operand_a = 0;
-
-        else
-          operand_a /= operand_b;
-
+        operand_a = safe_divide_32(operand_a, operand_b);
         break;
-      }
 
       case OP_MODULUS:
       {
-        int val;
-
-        if(operand_b == 0)
-        {
-          operand_a = 0;
-          break;
-        }
-
-        val = operand_a % operand_b;
+        int val = safe_modulo_32(operand_a, operand_b);
 
         // Converted C99 regulated truncated modulus to
         // the more useful (for us) floored modulus
@@ -552,15 +718,15 @@ int parse_expression(struct world *mzx_world, char **_expression, int *error,
         break;
 
       case OP_BITSHIFT_LEFT:
-        operand_a <<= operand_b;
+        operand_a = safe_left_shift_32(operand_a, operand_b);
         break;
 
       case OP_BITSHIFT_RIGHT:
-        operand_a = ((unsigned int)(operand_a) >> operand_b);
+        operand_a = safe_logical_right_shift_32(operand_a, operand_b);
         break;
 
       case OP_ARITHMETIC_BITSHIFT_RIGHT:
-        operand_a = ((signed int)(operand_a) >> operand_b);
+        operand_a = safe_arithmetic_right_shift_32(operand_a, operand_b);
         break;
 
       case OP_EQUAL:
@@ -617,55 +783,9 @@ int parse_expression(struct world *mzx_world, char **_expression, int *error,
         // False - seek next ':'
         else
         {
-          int paren_level = 0;
-          int ternary_level = 0;
-          while(1)
-          {
-            current_char = *expression;
-            expression++;
+          if(!ternary_short_circuit(&expression, ':', error))
+            goto err_out;
 
-            if(current_char == '\0')
-            {
-              *error = 2;
-              goto err_out;
-            }
-            else
-
-            if(current_char == '(')
-            {
-              paren_level++;
-            }
-            else
-
-            if(current_char == ')')
-            {
-              if(paren_level <= 0)
-              {
-                *error = 2;
-                goto err_out;
-              }
-              paren_level--;
-            }
-            else
-
-            if(current_char == '?')
-            {
-              if(paren_level == 0)
-                ternary_level++;
-            }
-            else
-
-            if(current_char == ':')
-            {
-              if(paren_level == 0)
-              {
-                if(ternary_level <= 0)
-                  break;
-
-                ternary_level--;
-              }
-            }
-          }
           // Preserve ternary middle state in case these are nested
           state = state & EXPR_STATE_TERNARY_MIDDLE;
         }
@@ -679,7 +799,6 @@ int parse_expression(struct world *mzx_world, char **_expression, int *error,
       {
         int value = operand_a;
         int ternary_level = 0;
-        int paren_level = 0;
 
         if(mzx_world->version < V290)
           goto err_out;
@@ -706,13 +825,13 @@ int parse_expression(struct world *mzx_world, char **_expression, int *error,
           else
 
           // Validate ternary operators while we're at it (actually necessary)
-          if(current_char == '?' && paren_level == 0)
+          if(current_char == '?')
           {
             ternary_level++;
           }
           else
 
-          if(current_char == ':' && paren_level == 0)
+          if(current_char == ':')
           {
             if(ternary_level == 0)
             {
@@ -734,18 +853,21 @@ int parse_expression(struct world *mzx_world, char **_expression, int *error,
           }
           else
 
+          if(current_char == '\'' || current_char == '&')
+          {
+            expression = skip_identifier(expression, current_char);
+          }
+          else
+
           if(current_char == '(')
           {
-            paren_level++;
+            expression = skip_expression(expression);
           }
           else
 
           if(current_char == ')')
           {
-            if(paren_level <= 0)
-              break;
-
-            paren_level--;
+            break;
           }
         }
 
@@ -760,7 +882,7 @@ int parse_expression(struct world *mzx_world, char **_expression, int *error,
       case ')':
       {
         int value = operand_a;
-        int len;
+        size_t len;
 
         // Invalid end of expression where : should exist
         if(state & EXPR_STATE_TERNARY_MIDDLE)
@@ -775,16 +897,15 @@ int parse_expression(struct world *mzx_world, char **_expression, int *error,
         // If we're in the middle of an operand, print to the buffer
         if(state & EXPR_STATE_PARSE_OPERAND)
         {
-          sprintf(number_buffer, "%d", value);
-          len = strlen(number_buffer);
+          char *src = tr_int_to_string(number_buffer, value, &len);
 
-          if(len+1 > (buf_alloc - buf_pos))
+          if((ptrdiff_t)(len + 1) > (buf_alloc - buf_pos))
           {
             // Truncate the interpolated value and continue.
             len = buf_alloc - buf_pos - 1;
           }
 
-          strcpy(buf_pos, number_buffer);
+          memcpy(buf_pos, src, len);
           buf_pos += len;
         }
 
@@ -1230,68 +1351,19 @@ static int parse_argument(struct world *mzx_world, char **_argument,
 
       // True - nothing to be done here
       // False - seek next ':'
+      argument++;
       if(!operand_a)
       {
-        int paren_level = 0;
-        int ternary_level = 0;
-        while(1)
+        if(!ternary_short_circuit(&argument, ':', NULL))
         {
-          argument++;
-          first_char = *argument;
-
-#ifndef CONFIG_DEBYTECODE
-          // It's hard to ensure these are actually valid for this parser in
-          // regular MZX (and we don't, since regular MZX uses a different
-          // parser now). But debytecode is validated ahead of time!
-          if(first_char == '\0')
-          {
-            *type = -1;
-            *_argument = argument;
-            return -1;
-          }
-          else
-#endif // !CONFIG_DEBYTECODE
-
-          if(first_char == '(')
-          {
-            paren_level++;
-          }
-          else
-
-          if(first_char == ')')
-          {
-            if(paren_level <= 0)
-            {
-              *type = -1;
-              *_argument = argument;
-              return -1;
-            }
-            paren_level--;
-          }
-          else
-
-          if(first_char == '?')
-          {
-            if(paren_level == 0)
-              ternary_level++;
-          }
-          else
-
-          if(first_char == ':')
-          {
-            if(paren_level == 0)
-            {
-              if(ternary_level <= 0)
-                break;
-
-              ternary_level--;
-            }
-          }
+          *type = -1;
+          *_argument = argument;
+          return -1;
         }
       }
 
       *type = 1;
-      *_argument = argument + 1;
+      *_argument = argument;
       return OP_TERNARY;
     }
 
@@ -1299,8 +1371,6 @@ static int parse_argument(struct world *mzx_world, char **_argument,
     case ':':
     {
       // We're only here because we finished execution of the inner argument.
-      int paren_level = 0;
-
       if(mzx_world->version < V290)
       {
         *type = -1;
@@ -1324,18 +1394,21 @@ static int parse_argument(struct world *mzx_world, char **_argument,
         else
 #endif // !CONFIG_DEBYTECODE
 
+        if(first_char == '`')
+        {
+          argument = skip_identifier(argument + 1, first_char) - 1;
+        }
+        else
+
         if(first_char == '(')
         {
-          paren_level++;
+          argument = skip_expression(argument + 1) - 1;
         }
         else
 
         if(first_char == ')')
         {
-          if(paren_level <= 0)
-            break;
-
-          paren_level--;
+          break;
         }
       }
 
@@ -1485,21 +1558,11 @@ static int evaluate_operation(int operand_a, enum op c_operator, int operand_b)
       return operand_a * operand_b;
 
     case OP_DIVISION:
-    {
-      if(operand_b == 0)
-        return 0;
-
-      return operand_a / operand_b;
-    }
+      return safe_divide_32(operand_a, operand_b);
 
     case OP_MODULUS:
     {
-      int val;
-
-      if(operand_b == 0)
-        return 0;
-
-      val = operand_a % operand_b;
+      int val = safe_modulo_32(operand_a, operand_b);
 
       // Converted C99 regulated truncated modulus to
       // the more useful (for us) floored modulus
@@ -1549,13 +1612,13 @@ static int evaluate_operation(int operand_a, enum op c_operator, int operand_b)
       return (operand_a ^ operand_b);
 
     case OP_BITSHIFT_LEFT:
-      return operand_a << operand_b;
+      return safe_left_shift_32(operand_a, operand_b);
 
     case OP_BITSHIFT_RIGHT:
-      return (unsigned int)(operand_a) >> operand_b;
+      return safe_logical_right_shift_32(operand_a, operand_b);
 
     case OP_ARITHMETIC_BITSHIFT_RIGHT:
-      return (signed int)(operand_a) >> operand_b;
+      return safe_arithmetic_right_shift_32(operand_a, operand_b);
 
     case OP_EQUAL:
       return operand_a == operand_b;
@@ -1723,16 +1786,18 @@ int parse_string_expression(struct world *mzx_world, char **_expression,
 
       default:
       {
-        char temp;
         char *next;
         struct string string;
+        char name_buffer[ROBOT_MAX_TR];
+        size_t len;
 
         next = find_non_identifier_char(expression);
+        len = MIN(ROBOT_MAX_TR - 1, next - expression);
 
-        temp = *next;
-        *next = 0;
-        get_string(mzx_world, expression, &string, id);
-        *next = temp;
+        memcpy(name_buffer, expression, len);
+        name_buffer[len] = '\0';
+
+        get_string(mzx_world, name_buffer, &string, id);
         expression = next;
 
         copy_length = string.length;

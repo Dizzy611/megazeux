@@ -26,20 +26,16 @@
 #include "../const.h"
 #include "../core.h"
 #include "../counter.h"
-#include "../data.h"
-#include "../error.h"
 #include "../event.h"
-#include "../graphics.h"
 #include "../idput.h"
-#include "../intake.h"
 #include "../robot.h"
+#include "../util.h"
 #include "../window.h"
 #include "../world.h"
 #include "../world_struct.h"
 
 #include "board.h"
 #include "configure.h"
-#include "edit.h"
 #include "edit_di.h"
 #include "param.h"
 #include "window.h"
@@ -938,8 +934,19 @@ void board_info(struct world *mzx_world)
   set_context(CTX_BOARD_INFO);
 
   strcpy(title_string, src_board->board_name);
-  strcpy(charset_string, src_board->charset_path);
-  strcpy(palette_string, src_board->palette_path);
+
+  charset_string[0] = '\0';
+  palette_string[0] = '\0';
+  if(src_board->charset_path)
+  {
+    snprintf(charset_string, MAX_PATH, "%s", src_board->charset_path);
+    charset_string[MAX_PATH - 1] = '\0';
+  }
+  if(src_board->palette_path)
+  {
+    snprintf(palette_string, MAX_PATH, "%s", src_board->palette_path);
+    palette_string[MAX_PATH - 1] = '\0';
+  }
 
   do
   {
@@ -1038,9 +1045,8 @@ void board_info(struct world *mzx_world)
     }
 
     src_board->time_limit = time_limit;
-
-    strcpy(src_board->charset_path, charset_string);
-    strcpy(src_board->palette_path, palette_string);
+    board_set_charset_path(src_board, charset_string, strlen(charset_string));
+    board_set_palette_path(src_board, palette_string, strlen(palette_string));
   }
 
   pop_context();
@@ -1496,7 +1502,7 @@ void global_info(context *ctx)
 * |
 * |  X-[00000][-][+]  Y-[00000][-][+]  |
 * |
-* |      [  Ok  ]        [Cancel]      |
+* |      [  OK  ]        [Cancel]      |
 * |
 * +------------------------------------+
 */
@@ -1531,7 +1537,7 @@ int board_goto(struct world *mzx_world, int overlay_edit,
     board_height = mzx_world->vlayer_height;
   }
 
-  elements[0] = construct_button( 7, 4, "  Ok  ", 0);
+  elements[0] = construct_button( 7, 4, "  OK  ", 0);
   elements[1] = construct_button(24, 4, "Cancel", 1);
   elements[2] = construct_number_box( 3, 2, "X-",
    0, board_width - 1, NUMBER_BOX, &goto_x);

@@ -19,6 +19,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -33,8 +34,6 @@
 #include "error.h"
 #include "event.h"
 #include "expr.h"
-#include "extmem.h"
-#include "fsafeopen.h"
 #include "game.h"
 #include "game_ops.h"
 #include "game_player.h"
@@ -50,6 +49,7 @@
 #include "util.h"
 #include "window.h"
 #include "world.h"
+#include "io/fsafeopen.h"
 
 #include "audio/audio.h"
 #include "audio/sfx.h"
@@ -347,7 +347,7 @@ static void send_at_xy(struct world *mzx_world, int id, int x, int y,
 static int get_random_range(int min_value, int max_value)
 {
   int result;
-  unsigned int difference;
+  uint64_t difference;
 
   if(min_value == max_value)
   {
@@ -357,15 +357,15 @@ static int get_random_range(int min_value, int max_value)
   {
     if(max_value > min_value)
     {
-      difference = max_value - min_value;
+      difference = (int64_t)max_value - (int64_t)min_value;
     }
     else
     {
-      difference = min_value - max_value;
+      difference = (int64_t)min_value - (int64_t)max_value;
       min_value = max_value;
     }
 
-    result = Random((unsigned long long)difference + 1) + min_value;
+    result = Random(difference + 1) + min_value;
   }
 
   return result;
@@ -651,8 +651,23 @@ static void copy_block(struct world *mzx_world, int id, int x, int y,
       char *translated_name = cmalloc(MAX_PATH);
       int err;
 
-      if(dest_param && !src_type)
-        src_type = 3;
+      switch(src_type)
+      {
+        case 0:
+          if(dest_param)
+            src_type = MZM_BOARD_TO_LAYER_STORAGE;
+          else
+            src_type = MZM_BOARD_TO_BOARD_STORAGE;
+          break;
+
+        case 1:
+          src_type = MZM_OVERLAY_TO_LAYER_STORAGE;
+          break;
+
+        case 2:
+          src_type = MZM_VLAYER_TO_LAYER_STORAGE;
+          break;
+      }
 
       // Save MZM to string (2.90+)
       if(mzx_world->version >= V290 && is_string(dest_name_buffer))
@@ -664,7 +679,7 @@ static void copy_block(struct world *mzx_world, int id, int x, int y,
       // Save MZM to file
       else
       {
-        err = fsafetranslate(dest_name_buffer, translated_name);
+        err = fsafetranslate(dest_name_buffer, translated_name, MAX_PATH);
         if(err == -FSAFE_SUCCESS || err == -FSAFE_MATCH_FAILED)
         {
           save_mzm(mzx_world, translated_name, src_x, src_y,
@@ -793,6 +808,93 @@ static void copy_block(struct world *mzx_world, int id, int x, int y,
 
       break;
     }
+  }
+}
+
+static void copy_xy_to_xy_wrapper(struct world *mzx_world, int id, int x, int y,
+ int src_type, int dest_type, int src_x, int src_y, int dest_x, int dest_y)
+{
+  struct board *cur_board = mzx_world->current_board;
+  int board_width = cur_board->board_width;
+  int board_height = cur_board->board_height;
+  int vlayer_width = mzx_world->vlayer_width;
+  int vlayer_height = mzx_world->vlayer_height;
+  int src_offset;
+  int dest_offset;
+
+  switch(src_type | (dest_type << 4))
+  {
+    // Board-to-board. Use the original implementation...
+    case 0x00:
+      prefix_first_last_xy(mzx_world, &src_x, &src_y, &dest_x, &dest_y, x, y);
+      copy_xy_to_xy(mzx_world, src_x, src_y, dest_x, dest_y);
+      break;
+
+    // Overlay-to-overlay.
+    case 0x11:
+      if(!cur_board->overlay_mode)
+        setup_overlay(cur_board, 3);
+
+      prefix_first_last_xy(mzx_world, &src_x, &src_y, &dest_x, &dest_y, x, y);
+      src_offset = src_y * board_width + src_x;
+      dest_offset = dest_y * board_width + dest_x;
+      cur_board->overlay[dest_offset] = cur_board->overlay[src_offset];
+      cur_board->overlay_color[dest_offset] = cur_board->overlay_color[src_offset];
+      break;
+
+    // Vlayer-to-overlay.
+    case 0x12:
+      if(!cur_board->overlay_mode)
+        setup_overlay(cur_board, 3);
+
+      prefix_first_xy_var(mzx_world, &src_x, &src_y, x, y,
+       vlayer_width, vlayer_height);
+      prefix_last_xy_var(mzx_world, &dest_x, &dest_y, x, y,
+       board_width, board_height);
+
+      src_offset = src_y * vlayer_width + src_x;
+      dest_offset = dest_y * board_width + dest_x;
+      cur_board->overlay[dest_offset] = mzx_world->vlayer_chars[src_offset];
+      cur_board->overlay_color[dest_offset] = mzx_world->vlayer_colors[src_offset];
+      break;
+
+    // Overlay-to-vlayer.
+    case 0x21:
+      if(!cur_board->overlay_mode)
+        setup_overlay(cur_board, 3);
+
+      prefix_first_xy_var(mzx_world, &src_x, &src_y, x, y,
+       board_width, board_height);
+      prefix_last_xy_var(mzx_world, &dest_x, &dest_y, x, y,
+       vlayer_width, vlayer_height);
+
+      src_offset = src_y * board_width + src_x;
+      dest_offset = dest_y * vlayer_width + dest_x;
+      mzx_world->vlayer_chars[dest_offset] = cur_board->overlay[src_offset];
+      mzx_world->vlayer_colors[dest_offset] = cur_board->overlay_color[src_offset];
+      break;
+
+    // Vlayer-to-vlayer.
+    case 0x22:
+      prefix_first_xy_var(mzx_world, &src_x, &src_y, x, y,
+       vlayer_width, vlayer_height);
+      prefix_last_xy_var(mzx_world, &dest_x, &dest_y, x, y,
+       vlayer_width, vlayer_height);
+
+      src_offset = src_y * vlayer_width + src_x;
+      dest_offset = dest_y * vlayer_width + dest_x;
+      mzx_world->vlayer_chars[dest_offset] = mzx_world->vlayer_chars[src_offset];
+      mzx_world->vlayer_colors[dest_offset] = mzx_world->vlayer_colors[src_offset];
+      break;
+
+    // All others should just use copy_block.
+    case 0x01:
+    case 0x02:
+    case 0x10:
+    case 0x20:
+      copy_block(mzx_world, id, x, y, src_type, dest_type, src_x, src_y, 1, 1,
+       dest_x, dest_y, NULL, 0, NULL);
+      break;
   }
 }
 
@@ -1471,10 +1573,10 @@ void run_robot(context *ctx, int id, int x, int y)
           else
           {
             // Set it to immediate representation
-            sprintf(src_buffer, "%d", parse_param(mzx_world,
-             src_string, id));
-            dest.value = src_buffer;
-            dest.length = strlen(src_buffer);
+            size_t tmp;
+            dest.value = tr_int_to_string(src_buffer,
+             parse_param(mzx_world, src_string, id), &tmp);
+            dest.length = tmp;
           }
 
           gotoed = set_string(mzx_world, dest_buffer, &dest, id);
@@ -1624,8 +1726,6 @@ void run_robot(context *ctx, int id, int x, int y)
         {
           struct string dest;
           struct string src;
-          int allow_wildcards = 0;
-          int exact_case = 0;
 
           // NOTE: versions prior to 2.92 did tr_msg here instead of above.
 
@@ -1648,25 +1748,37 @@ void run_robot(context *ctx, int id, int x, int y)
           }
           else
           {
-            sprintf(src_buffer, "%d", parse_param(mzx_world,
-             src_string, id));
-            src.value = src_buffer;
-            src.length = strlen(src_buffer);
+            size_t tmp;
+            src.value = tr_int_to_string(src_buffer,
+             parse_param(mzx_world, src_string, id), &tmp);
+            src.length = tmp;
           }
 
-          // String equality extensions (2.91+)
-          if(mzx_world->version >= V291)
+          // Non-terminated string compares (2.81+)
+          if(mzx_world->version >= V281)
           {
-            if(comparison == EXACTLY_EQUAL || comparison == WILD_EXACTLY_EQUAL)
-              exact_case = 1;
+            boolean exact_case = false;
+            boolean wildcards = false;
 
-            if(comparison == WILD_EQUAL || comparison == WILD_EXACTLY_EQUAL)
-              allow_wildcards = 1;
+            // String equality extensions (2.91+)
+            if(mzx_world->version >= V291)
+            {
+              if(comparison == EXACTLY_EQUAL || comparison == WILD_EXACTLY_EQUAL)
+                exact_case = true;
+
+              if(comparison == WILD_EQUAL || comparison == WILD_EXACTLY_EQUAL)
+                wildcards = true;
+            }
+
+            src_value = 0;
+            dest_value = compare_strings(&dest, &src, exact_case, wildcards);
           }
-
-          src_value = 0;
-          dest_value = compare_strings(&dest, &src,
-           exact_case, allow_wildcards);
+          // Null-terminated string compares (2.80X and prior).
+          else
+          {
+            src_value = 0;
+            dest_value = compare_strings_null_terminated(&dest, &src);
+          }
         }
         else
 
@@ -2436,6 +2548,7 @@ void run_robot(context *ctx, int id, int x, int y)
           gotoed = send_self_label_tr(mzx_world,  p2 + 4, id);
         }
 
+        last_label = -1;
         break;
       }
 
@@ -3095,14 +3208,14 @@ void run_robot(context *ctx, int id, int x, int y)
 
             if(get_string(mzx_world, mzm_name_buffer, &src, id))
               load_mzm_memory(mzx_world, mzm_name_buffer, put_x, put_y,
-               put_param, 1, src.value, src.length);
+               put_param, 1, CUSTOM_BLOCK, src.value, src.length);
           }
           else
           {
-            if(!fsafetranslate(mzm_name_buffer, translated_name))
+            if(!fsafetranslate(mzm_name_buffer, translated_name, MAX_PATH))
             {
               load_mzm(mzx_world, translated_name, put_x, put_y,
-              put_param, 1);
+               put_param, 1, CUSTOM_BLOCK);
             }
           }
           free(translated_name);
@@ -3440,6 +3553,7 @@ void run_robot(context *ctx, int id, int x, int y)
         tr_msg(mzx_world, cmd_ptr + 2, id, dest_buffer);
         result = get_random_range(min_value, max_value);
         inc_counter(mzx_world, dest_buffer, result, id);
+        last_label = -1;
         break;
       }
 
@@ -3455,6 +3569,7 @@ void run_robot(context *ctx, int id, int x, int y)
         tr_msg(mzx_world, cmd_ptr + 2, id, dest_buffer);
         result = get_random_range(min_value, max_value);
         dec_counter(mzx_world, dest_buffer, result, id);
+        last_label = -1;
         break;
       }
 
@@ -3470,6 +3585,7 @@ void run_robot(context *ctx, int id, int x, int y)
         tr_msg(mzx_world, cmd_ptr + 2, id, dest_buffer);
         result = get_random_range(min_value, max_value);
         set_counter(mzx_world, dest_buffer, result, id);
+        last_label = -1;
         break;
       }
 
@@ -3703,7 +3819,6 @@ void run_robot(context *ctx, int id, int x, int y)
 
       case ROBOTIC_CMD_TELEPORT: // teleport
       {
-        struct board *cur_board = mzx_world->current_board;
         char board_dest_buffer[ROBOT_MAX_TR];
         char *p2 = next_param_pos(cmd_ptr + 1);
         int teleport_x = parse_param(mzx_world, p2, id);
@@ -3716,11 +3831,9 @@ void run_robot(context *ctx, int id, int x, int y)
 
         if(board_id != NO_BOARD)
         {
-          set_current_board_ext(mzx_world, mzx_world->board_list[board_id]);
-          prefix_mid_xy(mzx_world, &teleport_x, &teleport_y, x, y);
+          prefix_mid_xy_ext(mzx_world, mzx_world->board_list[board_id],
+           &teleport_x, &teleport_y, x, y);
 
-          // And switch back
-          set_current_board_ext(mzx_world, cur_board);
           mzx_world->target_board = board_id;
           mzx_world->target_x = teleport_x;
           mzx_world->target_y = teleport_y;
@@ -3766,39 +3879,40 @@ void run_robot(context *ctx, int id, int x, int y)
       case ROBOTIC_CMD_INPUT: // input string
       {
         char input_buffer[ROBOT_MAX_TR];
-        char input_buffer_msg[71 + 1];
+        char title_buffer[ROBOT_MAX_TR];
         char *break_pos;
+        size_t len;
 
-        // Copy and clip
-        strncpy(input_buffer_msg, cmd_ptr + 2, 71);
-        input_buffer_msg[71] = 0;
+        tr_msg(mzx_world, cmd_ptr + 2, id, title_buffer);
+        title_buffer[71] = '\0';
 
-        // No linebreak thanks bye
-        if((break_pos = strchr(input_buffer_msg, '\n')))
+        // Newlines break the UI. :(
+        break_pos = strchr(title_buffer, '\n');
+        if(break_pos)
           *break_pos = '\0';
 
-        tr_msg(mzx_world, input_buffer_msg, id, input_buffer);
-        input_buffer[71] = 0;
-
-        src_board->input_string[0] = 0;
+        input_buffer[0] = 0;
 
         dialog_fadein();
-        input_window(mzx_world, input_buffer, src_board->input_string, 70);
+        input_window(mzx_world, title_buffer, input_buffer, 70);
 
         // Due to a faulty check, 2.83 through 2.91f always stay faded in here.
         // If something is found that relies on that, make this conditional.
         dialog_fadeout();
 
-        src_board->input_size = strlen(src_board->input_string);
-        src_board->num_input = atoi(src_board->input_string);
+        len = strlen(input_buffer);
+        board_set_input_string(src_board, input_buffer, len);
+        src_board->input_size = len;
+        src_board->num_input = len ? atoi(src_board->input_string) : 0;
         break;
       }
 
       case ROBOTIC_CMD_IF_INPUT: // If string "" "l"
       {
+        const char *input_string = src_board->input_string ? src_board->input_string : "";
         char cmp_buffer[ROBOT_MAX_TR];
         tr_msg(mzx_world, cmd_ptr + 2, id, cmp_buffer);
-        if(!strcasecmp(cmp_buffer, src_board->input_string))
+        if(!strcasecmp(cmp_buffer, input_string))
         {
           char *p2 = next_param_pos(cmd_ptr + 1);
           gotoed = send_self_label_tr(mzx_world, p2 + 1, id);
@@ -3808,9 +3922,10 @@ void run_robot(context *ctx, int id, int x, int y)
 
       case ROBOTIC_CMD_IF_INPUT_NOT: // If string not "" "l"
       {
+        const char *input_string = src_board->input_string ? src_board->input_string : "";
         char cmp_buffer[ROBOT_MAX_TR];
         tr_msg(mzx_world, cmd_ptr + 2, id, cmp_buffer);
-        if(strcasecmp(cmp_buffer, src_board->input_string))
+        if(strcasecmp(cmp_buffer, input_string))
         {
           char *p2 = next_param_pos(cmd_ptr + 1);
           gotoed = send_self_label_tr(mzx_world, p2 + 1, id);
@@ -3821,8 +3936,8 @@ void run_robot(context *ctx, int id, int x, int y)
       case ROBOTIC_CMD_IF_INPUT_MATCHES: // If string matches "" "l"
       {
         // compare
+        const char *input_string = src_board->input_string ? src_board->input_string : "";
         char cmp_buffer[ROBOT_MAX_TR];
-        char *input_string = src_board->input_string;
         size_t i, cmp_len;
         char current_char;
         char cmp_char;
@@ -3972,28 +4087,16 @@ void run_robot(context *ctx, int id, int x, int y)
         if((type[2] == type[3]) && (type[2] <= 2))
           dest_type = type[2];
 
-        if((src_type < 0) || (dest_type < 0))
-          break;
-
-        // Do the copy.  If it's board to board, use the original impl.
-        if((src_type == 0) && (dest_type == 0))
-        {
-          prefix_first_last_xy(mzx_world, &src_x, &src_y, &dest_x, &dest_y, x, y);
-
-          copy_xy_to_xy(mzx_world, src_x, src_y, dest_x, dest_y);
-        }
-        else
-        {
-          copy_block(mzx_world, id, x, y, src_type, dest_type, src_x, src_y, 1, 1,
-           dest_x, dest_y, NULL, 0, NULL);
-        }
+        // Do the copy. This may invoke copy_block internally.
+        copy_xy_to_xy_wrapper(mzx_world, id, x, y, src_type, dest_type,
+         src_x, src_y, dest_x, dest_y);
 
         // If this robot was deleted, exit. NOTE: all port versions prior
         // to 2.92 had a faulty check here that would only check dest_x
         // and dest_y and not whether or not the robot was actually
         // overwritten. If something actually relied on this, add a
         // version check.
-        if(id)
+        if(id && dest_type == 0)
         {
           int offset = x + (y * board_width);
           int d_id = (enum thing)level_id[offset];
@@ -4058,9 +4161,10 @@ void run_robot(context *ctx, int id, int x, int y)
           next_param = next_param_pos(next_param);
         }
         // Prior to 2.90 char params are clipped
-        if(mzx_world->version < V290) char_num &= 0xFF;
-        if(char_num <= 0xFF || layer_renderer_check(true))
-          ec_change_char(char_num, char_buffer);
+        if(mzx_world->version < V290)
+          char_num &= 0xFF;
+
+        ec_change_char(char_num, char_buffer);
         break;
       }
 
@@ -4966,33 +5070,27 @@ void run_robot(context *ctx, int id, int x, int y)
 
       case ROBOTIC_CMD_CLIP_INPUT: // Clip input
       {
-        size_t i = 0, input_size = src_board->input_size;
-        char *input_string = src_board->input_string;
+        const char *input_string = src_board->input_string ? src_board->input_string : "";
+        size_t input_size = src_board->input_size;
+        size_t i = 0;
 
         // Chop up to and through first section of whitespace.
         // First, until non space or end
-        if(input_size)
+        while(*input_string && i < input_size)
         {
-          do
-          {
-            if(input_string[i] == 32)
-              break;
-          } while((++i) < input_size);
+          if(*input_string == ' ')
+            break;
+          input_string++;
+          i++;
         }
 
-        if(input_string[i] == 32)
-        {
-          do
-          {
-            if(input_string[i] != 32)
-              break;
-          } while((++i) < input_size);
-        }
-        // Chop UNTIL i. (i points to first No-Chop)
+        while(*input_string == ' ' && i < input_size)
+          input_string++, i++;
 
-        strcpy(input_string, input_string + i);
-        src_board->input_size = strlen(input_string);
-        src_board->num_input = atoi(input_string);
+        i = strlen(input_string);
+        board_set_input_string(src_board, input_string, i);
+        src_board->input_size = i;
+        src_board->num_input = i ? atoi(src_board->input_string) : 0;
         break;
       }
 
@@ -5305,7 +5403,7 @@ void run_robot(context *ctx, int id, int x, int y)
         else
 
         // Load from file
-        if(!fsafetranslate(src_name, translated_name))
+        if(!fsafetranslate(src_name, translated_name, MAX_PATH))
         {
           ec_load_set_var(translated_name, pos, mzx_world->version);
         }
@@ -5387,7 +5485,7 @@ void run_robot(context *ctx, int id, int x, int y)
         else
 
         // Load palette from file
-        if(!fsafetranslate(name_buffer, translated_name))
+        if(!fsafetranslate(name_buffer, translated_name, MAX_PATH))
         {
           load_palette(translated_name);
         }
@@ -5458,7 +5556,7 @@ void run_robot(context *ctx, int id, int x, int y)
         tr_msg(mzx_world, cmd_ptr + 2, id, name_buffer);
 
         // Couldn't find world to swap to; abort cleanly
-        if(fsafetranslate(name_buffer, translated_name))
+        if(fsafetranslate(name_buffer, translated_name, MAX_PATH))
         {
           free(translated_name);
           break;
@@ -5539,9 +5637,13 @@ void run_robot(context *ctx, int id, int x, int y)
 
       case ROBOTIC_CMD_IF_FIRST_INPUT: // If first string str str
       {
+        char tmp[2] = "";
         char *input_string = src_board->input_string;
         char match_string_buffer[ROBOT_MAX_TR];
         ssize_t i = 0;
+
+        if(!input_string)
+          input_string = tmp;
 
         if(src_board->input_size)
         {
@@ -5549,7 +5651,7 @@ void run_robot(context *ctx, int id, int x, int y)
           {
             if(input_string[i] == 32) break;
             i++;
-          } while(i < (ssize_t)src_board->input_size);
+          } while(i < (ssize_t)src_board->input_size && input_string[i]);
         }
 
         if(input_string[i] == 32)

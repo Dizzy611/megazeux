@@ -28,31 +28,33 @@
 
 #include "../graphics.h"
 #include "../util.h"
+#include "../io/vio.h"
 
+#include <stdint.h>
 #include <string.h>
-#include <stdio.h>
 
-static Uint8 ascii_charset[CHAR_SIZE * CHARSET_SIZE];
-static Uint8 blank_charset[CHAR_SIZE * CHARSET_SIZE];
-static Uint8 smzx_charset[CHAR_SIZE * CHARSET_SIZE];
+static uint8_t ascii_charset[CHAR_SIZE * CHARSET_SIZE];
+static uint8_t blank_charset[CHAR_SIZE * CHARSET_SIZE];
+static uint8_t smzx_charset[CHAR_SIZE * CHARSET_SIZE];
+static uint8_t smzx_charset2[CHAR_SIZE * CHARSET_SIZE];
 
-void store_backup_palette(char dest[SMZX_PAL_SIZE])
+void store_backup_palette(char dest[SMZX_PAL_SIZE * 3])
 {
-  Uint32 i;
-  Uint8 *r;
-  Uint8 *g;
-  Uint8 *b;
+  uint32_t i;
+  uint8_t *r;
+  uint8_t *g;
+  uint8_t *b;
 
   for(i = 0; i < graphics.protected_pal_position; i++)
   {
-    r = (Uint8 *)(dest++);
-    g = (Uint8 *)(dest++);
-    b = (Uint8 *)(dest++);
+    r = (uint8_t *)(dest++);
+    g = (uint8_t *)(dest++);
+    b = (uint8_t *)(dest++);
     get_rgb(i, r, g, b);
   }
 }
 
-void load_backup_palette(char src[SMZX_PAL_SIZE * 3])
+void load_backup_palette(const char src[SMZX_PAL_SIZE * 3])
 {
   load_palette_mem(src, SMZX_PAL_SIZE * 3);
 }
@@ -62,14 +64,14 @@ void store_backup_indices(char dest[SMZX_PAL_SIZE * 4])
   memcpy(dest, graphics.smzx_indices, SMZX_PAL_SIZE * 4);
 }
 
-void load_backup_indices(char src[SMZX_PAL_SIZE * 4])
+void load_backup_indices(const char src[SMZX_PAL_SIZE * 4])
 {
   memcpy(graphics.smzx_indices, src, SMZX_PAL_SIZE * 4);
 }
 
 void save_palette(char *fname)
 {
-  FILE *pal_file = fopen_unsafe(fname, "wb");
+  vfile *pal_file = vfopen_unsafe(fname, "wb");
 
   if(pal_file)
   {
@@ -81,18 +83,18 @@ void save_palette(char *fname)
 
     for(i = 0; i < num_colors; i++)
     {
-      fputc(get_red_component(i), pal_file);
-      fputc(get_green_component(i), pal_file);
-      fputc(get_blue_component(i), pal_file);
+      vfputc(get_red_component(i), pal_file);
+      vfputc(get_green_component(i), pal_file);
+      vfputc(get_blue_component(i), pal_file);
     }
 
-    fclose(pal_file);
+    vfclose(pal_file);
   }
 }
 
 void save_index_file(char *fname)
 {
-  FILE *idx_file = fopen_unsafe(fname, "wb");
+  vfile *idx_file = vfopen_unsafe(fname, "wb");
 
   if(idx_file)
   {
@@ -100,46 +102,37 @@ void save_index_file(char *fname)
 
     for(i = 0; i < SMZX_PAL_SIZE; i++)
     {
-      fputc(get_smzx_index(i, 0), idx_file);
-      fputc(get_smzx_index(i, 1), idx_file);
-      fputc(get_smzx_index(i, 2), idx_file);
-      fputc(get_smzx_index(i, 3), idx_file);
+      vfputc(get_smzx_index(i, 0), idx_file);
+      vfputc(get_smzx_index(i, 1), idx_file);
+      vfputc(get_smzx_index(i, 2), idx_file);
+      vfputc(get_smzx_index(i, 3), idx_file);
     }
 
-    fclose(idx_file);
+    vfclose(idx_file);
   }
 }
 
-void draw_char_mixed_pal(Uint8 chr, Uint8 bg_color, Uint8 fg_color,
- Uint32 x, Uint32 y)
+void ec_save_set_var(const char *name, uint16_t first_chr, unsigned int num)
 {
-  draw_char_mixed_pal_ext(chr, bg_color, fg_color, x, y, PRO_CH);
-}
+  vfile *vf = vfopen_unsafe(name, "wb");
 
-void draw_char_linear(Uint8 color, Uint8 chr, Uint32 offset,
- boolean use_protected_pal)
-{
-  draw_char_linear_ext(color, chr, offset, PRO_CH, use_protected_pal ? 16 : 0);
-}
-
-void ec_save_set_var(char *name, Uint16 offset, Uint32 size)
-{
-  FILE *fp = fopen_unsafe(name, "wb");
-
-  if(fp)
+  if(vf)
   {
-    if(size + offset > PROTECTED_CHARSET_POSITION)
+    if(num + first_chr > PROTECTED_CHARSET_POSITION)
     {
-      size = PROTECTED_CHARSET_POSITION - offset;
+      if(first_chr > PROTECTED_CHARSET_POSITION)
+        first_chr = PROTECTED_CHARSET_POSITION;
+
+      num = PROTECTED_CHARSET_POSITION - first_chr;
     }
 
-    fwrite(graphics.charset + (offset * CHAR_SIZE), CHAR_SIZE, size, fp);
-    fclose(fp);
+    vfwrite(graphics.charset + (first_chr * CHAR_SIZE), CHAR_SIZE, num, vf);
+    vfclose(vf);
   }
 }
 
-void ec_change_block(Uint8 offset, Uint8 charset,
- Uint8 width, Uint8 height, char *matrix)
+void ec_change_block(uint8_t offset, uint8_t charset,
+ uint8_t width, uint8_t height, const char *matrix)
 {
   // Change a block of chars on the 32x8 charset
   int skip;
@@ -151,7 +144,7 @@ void ec_change_block(Uint8 offset, Uint8 charset,
 
   skip = 32 - width;
 
-  // No need to bound offset (Uint8)
+  // No need to bound offset (uint8_t)
   for(y = 0; y < height; y++)
   {
     for(x = 0; x < width; x++)
@@ -164,8 +157,8 @@ void ec_change_block(Uint8 offset, Uint8 charset,
   }
 }
 
-void ec_read_block(Uint8 offset, Uint8 charset,
- Uint8 width, Uint8 height, char *matrix)
+void ec_read_block(uint8_t offset, uint8_t charset,
+ uint8_t width, uint8_t height, char *matrix)
 {
   // Read a block of chars from the 32x8 charset
   int skip;
@@ -194,11 +187,17 @@ void load_editor_charsets(void)
   ec_load_set_secondary(mzx_res_get_by_id(MZX_ASCII_CHR), ascii_charset);
   ec_load_set_secondary(mzx_res_get_by_id(MZX_BLANK_CHR), blank_charset);
   ec_load_set_secondary(mzx_res_get_by_id(MZX_SMZX_CHR),  smzx_charset);
+  ec_load_set_secondary(mzx_res_get_by_id(MZX_SMZX2_CHR), smzx_charset2);
 }
 
 void ec_load_smzx(void)
 {
   ec_mem_load_set(smzx_charset, CHAR_SIZE * CHARSET_SIZE);
+}
+
+void ec_load_smzx2(void)
+{
+  ec_mem_load_set(smzx_charset2, CHAR_SIZE * CHARSET_SIZE);
 }
 
 void ec_load_blank(void)
@@ -211,20 +210,47 @@ void ec_load_ascii(void)
   ec_mem_load_set(ascii_charset, CHAR_SIZE * CHARSET_SIZE);
 }
 
-void ec_load_char_ascii(Uint32 char_number)
+void ec_load_char_ascii(uint16_t char_number)
 {
-  Uint32 ascii_number = char_number & 0xFF;
-  char *ascii_char = (char *)(ascii_charset + ascii_number * CHAR_SIZE);
+  unsigned int ascii_number = char_number & 0xFF;
+  uint8_t *ascii_char = ascii_charset + ascii_number * CHAR_SIZE;
 
-  ec_change_char(char_number, ascii_char);
+  ec_change_char(char_number, (char *)ascii_char);
 }
 
-void ec_load_char_mzx(Uint32 char_number)
+void ec_load_char_mzx(uint16_t char_number)
 {
-  Uint8 *default_charset = graphics.default_charset;
-  Uint32 default_number = char_number & 0xFF;
+  unsigned int default_number = char_number & 0xFF;
+  uint8_t *default_char = graphics.default_charset + default_number * CHAR_SIZE;
 
-  char *default_char = (char *)(default_charset + default_number * CHAR_SIZE);
+  ec_change_char(char_number, (char *)default_char);
+}
 
-  ec_change_char(char_number, default_char);
+/**
+ * Returns the number of pixels (from 0 to 112) that are the same between two
+ * chars.
+ */
+unsigned int compare_char(uint16_t chr_a, uint16_t chr_b)
+{
+  uint8_t *a = graphics.charset + (chr_a % FULL_CHARSET_SIZE) * CHAR_SIZE;
+  uint8_t *b = graphics.charset + (chr_b % FULL_CHARSET_SIZE) * CHAR_SIZE;
+  unsigned int same = 0;
+  int i;
+  int mask;
+
+  if(get_screen_mode())
+  {
+    for(i = 0; i < CHAR_SIZE; i++)
+      for(mask = 0xC0; mask > 0; mask >>= 2)
+        same += (a[i] & mask) == (b[i] & mask);
+
+    same *= 2;
+  }
+  else
+  {
+    for(i = 0; i < CHAR_SIZE; i++)
+      for(mask = 0x80; mask > 0; mask >>= 1)
+        same += (a[i] & mask) == (b[i] & mask);
+  }
+  return same;
 }

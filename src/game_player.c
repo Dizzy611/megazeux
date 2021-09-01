@@ -20,6 +20,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include <string.h>
+
 #include "counter.h"
 #include "game.h"
 #include "game_ops.h"
@@ -28,6 +30,7 @@
 #include "idput.h"
 #include "robot.h"
 #include "scrdisp.h"
+#include "util.h"
 #include "window.h"
 #include "world_struct.h"
 
@@ -47,7 +50,7 @@ void set_mesg(struct world *mzx_world, const char *str)
 
 void set_mesg_direct(struct board *src_board, const char *str)
 {
-  strncpy(src_board->bottom_mesg, str, ROBOT_MAX_TR - 1);
+  snprintf(src_board->bottom_mesg, ROBOT_MAX_TR, "%s", str);
   src_board->bottom_mesg[ROBOT_MAX_TR - 1] = 0;
   src_board->b_mesg_timer = MESG_TIMEOUT;
   clear_intro_mesg();

@@ -24,9 +24,11 @@
 
 #include "data.h"
 #include "rasm.h"
-#include "fsafeopen.h"
 #include "util.h"
 #include "counter.h"
+#include "io/fsafeopen.h"
+#include "io/memfile.h"
+#include "io/vio.h"
 
 #ifdef CONFIG_DEBYTECODE
 
@@ -4102,7 +4104,7 @@ static int match_command(const struct mzx_command *command,
       if((current_token == NULL) || (current_token->type != TOKEN_TYPE_COMMENT))
         goto no_match;
 
-      *match_type = TOKEN_TYPE_COMMENT;
+      *match_type = ARG_TYPE_INDEXED_COMMENT;
       next = current_token->value + current_token->length;
     }
   }
@@ -4470,8 +4472,8 @@ static char *assemble_command(char *src, char **_output)
     int newline_pos = strcspn(src, "\n");
     if(newline_pos > 0)
     {
-      strncpy(short_output, src, newline_pos);
-      short_output[newline_pos] = 0;
+      snprintf(short_output, sizeof(short_output), "%.*s", newline_pos, src);
+      short_output[sizeof(short_output) - 1] = 0;
       warn("Failed to assemble command: %s\n", short_output);
     }
   }
@@ -4614,7 +4616,7 @@ enum legacy_command_number
   ROBOTIC_CMD_REMOVED = 0xFF01
 };
 
-static const enum legacy_command_number legacy_command_to_current[256] =
+static const int legacy_command_to_current[256] =
 {
   ROBOTIC_CMD_END,
   ROBOTIC_CMD_DIE,
@@ -5053,7 +5055,7 @@ static char *legacy_disassemble_print_expr_value_token(char *src,
   char *next_next;
 
   // Unary operators are okay, just eats up spaces until next ones.
-  while((*next == '-') || (*next == '~'))
+  while((*next == '-') || (*next == '~') || (*next == '!'))
   {
     *output = *next;
     output++;
@@ -5859,7 +5861,7 @@ char *legacy_disassemble_program(char *program_bytecode, int bytecode_length,
 char *legacy_convert_file(char *file_name, int *_disasm_length,
  boolean print_ignores, int base)
 {
-  FILE *legacy_source_file = fsafeopen(file_name, "rt");
+  vfile *legacy_source_file = fsafeopen(file_name, "rt");
 
   if(legacy_source_file)
   {
@@ -5875,7 +5877,7 @@ char *legacy_convert_file(char *file_name, int *_disasm_length,
 
     int disasm_line_length;
 
-    while(fsafegets(source_buffer, 256, legacy_source_file))
+    while(vfsafegets(source_buffer, 256, legacy_source_file))
     {
       // Assemble line
       legacy_assemble_line(source_buffer, bytecode_buffer, errors,
@@ -5912,7 +5914,7 @@ char *legacy_convert_file(char *file_name, int *_disasm_length,
     program_disasm[disasm_offset] = 0;
     *_disasm_length = disasm_length;
 
-    fclose(legacy_source_file);
+    vfclose(legacy_source_file);
     return program_disasm;
   }
 
@@ -5924,8 +5926,7 @@ char *legacy_convert_program(char *src, int len, int *_disasm_length,
 {
   if(len)
   {
-    char *input_start = src;
-    char *input_end = src + len;
+    struct memfile mf;
 
     int disasm_length = 0;
     int disasm_offset = 0;
@@ -5939,9 +5940,11 @@ char *legacy_convert_program(char *src, int len, int *_disasm_length,
 
     int disasm_line_length;
 
+    mfopen(src, len, &mf);
+
     // Copying to a buffer isn't the quickest solution, but trying to
     // handle it differently turns into spaghetti.
-    while(memsafegets(source_buffer, 255, &input_start, input_end))
+    while(mfsafegets(source_buffer, 256, &mf))
     {
       // Assemble line
       legacy_assemble_line(source_buffer, bytecode_buffer, errors,

@@ -19,10 +19,11 @@
  */
 
 #include "../../src/event.h"
-#include "../../src/platform.h"
 #include "../../src/graphics.h"
+#include "../../src/platform.h"
 
 #include <nds/arm9/keyboard.h>
+#include "event.h"
 #include "render.h"
 #include "evq.h"
 
@@ -31,6 +32,7 @@ static boolean process_event(NDSEvent *event);
 
 extern struct input_status input;
 extern u16 subscreen_height;
+static enum focus_mode allow_focus_changes = FOCUS_ALLOW;
 
 static boolean keyboard_allow_release = true;
 
@@ -45,6 +47,12 @@ boolean __update_event_status(void)
   return retval;
 }
 
+boolean __peek_exit_input(void)
+{
+  /* FIXME stub */
+  return false;
+}
+
 void __wait_event(void)
 {
   NDSEvent event;
@@ -54,18 +62,15 @@ void __wait_event(void)
   process_event(&event);
 }
 
-void real_warp_mouse(int x, int y)
+void __warp_mouse(int x, int y)
 {
-  const struct buffered_status *status = load_status();
-
-  if(x < 0)
-    x = status->real_mouse_x;
-
-  if(y < 0)
-    y = status->real_mouse_y;
-
-  // Since we can't warp a touchscreen stylus, focus there instead.
+  // Since the touchscreen stylus can't be warped, focus there instead.
   focus_pixel(x, y);
+}
+
+enum focus_mode get_allow_focus_changes(void)
+{
+  return allow_focus_changes;
 }
 
 void initialize_joysticks(void)
@@ -198,7 +203,8 @@ static boolean process_event(NDSEvent *event)
     {
       int internal_code, unicode;
       convert_nds_internal(event->key, &internal_code, &unicode);
-      key_press(status, internal_code, unicode);
+      key_press(status, internal_code);
+      key_press_unicode(status, unicode, true);
 
       keyboard_allow_release = true;
       break;
@@ -215,25 +221,26 @@ static boolean process_event(NDSEvent *event)
     // Touchscreen stylus down
     case NDS_EVENT_TOUCH_DOWN:
     {
-      int button = MOUSE_BUTTON_LEFT;
+      enum mouse_button button = MOUSE_BUTTON_LEFT;
       status->mouse_button = button;
       status->mouse_repeat = button;
       status->mouse_button_state |= MOUSE_BUTTON(button);
       status->mouse_repeat_state = 1;
       status->mouse_drag_state = -1;
       status->mouse_time = get_ticks();
+      allow_focus_changes = FOCUS_FORBID;
       break;
     }
 
     // Touchscreen stylus up
     case NDS_EVENT_TOUCH_UP:
     {
-      int button = MOUSE_BUTTON_LEFT;
+      enum mouse_button button = MOUSE_BUTTON_LEFT;
       status->mouse_button_state &= ~MOUSE_BUTTON(button);
       status->mouse_repeat = 0;
       status->mouse_drag_state = 0;
       status->mouse_repeat_state = 0;
-      nds_mouselook(false);
+      allow_focus_changes = FOCUS_ALLOW;
       break;
     }
 
@@ -246,16 +253,16 @@ static boolean process_event(NDSEvent *event)
         break;
 
       // Update the MZX mouse state.
-      status->real_mouse_x = mx;
-      status->real_mouse_y = my;
+      status->mouse_pixel_x = mx;
+      status->mouse_pixel_y = my;
       status->mouse_x = mx / 8;
       status->mouse_y = my / 14;
       status->mouse_moved = true;
 
-      // Update our internal mouselook state.
-      nds_mouselook(false);
+      // Update our internal focus.
+      allow_focus_changes = FOCUS_PASS;
       focus_pixel(mx, my);
-      nds_mouselook(true);
+      allow_focus_changes = FOCUS_FORBID;
       break;
     }
 

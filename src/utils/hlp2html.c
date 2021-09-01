@@ -26,23 +26,30 @@
 #define SKIP_SDL
 #define CORE_LIBSPEC
 #include "../compat.h"
+#include "../hashtable.h"
 #include "../util.h"
-#include "../../contrib/khash/khashmzx.h"
+#include "../io/memfile.h"
+
+#include "utils_alloc.h"
 
 #ifdef CONFIG_PLEDGE_UTILS
 #include <unistd.h>
 #define PROMISES "stdio rpath wpath cpath"
 #endif
 
+#ifndef VERSION_DATE
+#define VERSION_DATE
+#endif
+
 #define EOL "\n"
 #define MZXFONT_OFFSET (0xE000)
 
-static const char * const usage =
- "hlp2html - Convert help text file to HTML." EOL
- "usage: hlp2html input.txt output.html [options]..." EOL EOL
- "options:" EOL
- "    -c : color+printable version (default)" EOL
- "    -p : printable-only version" EOL;
+#define USAGE \
+ "hlp2html - Convert help text file to HTML." EOL \
+ "usage: hlp2html input.txt output.html [options]..." EOL EOL \
+ "options:" EOL \
+ "    -c : color+printable version (default)" EOL \
+ "    -p : printable-only version" EOL
 
 #define RESOURCES "contrib/hlp2html/"
 static const char * const font_file =         RESOURCES "fonts.css";
@@ -53,12 +60,6 @@ static const char * const style_extras_file = RESOURCES "style_color.css";
 #define MAX_LINE 256
 #define MAX_FILE_NAME 16
 #define MAX_ANCHOR_NAME 32
-
-int error(const char *message, unsigned int a, unsigned int b, unsigned int c)
-{
-  fprintf(stderr, "%s\n", message);
-  exit(-1);
-}
 
 struct html_buffer
 {
@@ -72,6 +73,7 @@ struct help_file
   // HTML ID- needs to be unique. Use the real internal file name.
   char name[MAX_FILE_NAME];
   int name_length;
+  uint32_t hash;
 
   struct html_buffer html;
 };
@@ -83,6 +85,7 @@ struct help_anchor
   // HTML ID- needs to be unique. Use the real link name.
   char name[MAX_ANCHOR_NAME];
   int name_length;
+  uint32_t hash;
 };
 
 struct help_link
@@ -97,15 +100,16 @@ struct help_link
   // used for anything right now.
   char name[MAX_ANCHOR_NAME];
   int name_length;
+  uint32_t hash;
 };
 
-KHASH_SET_INIT(FILES, struct help_file *, name, name_length)
-KHASH_SET_INIT(ANCHORS, struct help_anchor *, name, name_length)
-KHASH_SET_INIT(LINKS, struct help_link *, name, name_length)
+HASH_SET_INIT(FILES, struct help_file *, name, name_length)
+HASH_SET_INIT(ANCHORS, struct help_anchor *, name, name_length)
+HASH_SET_INIT(LINKS, struct help_link *, name, name_length)
 
-static khash_t(FILES) *files_table = NULL;
-static khash_t(ANCHORS) *anchors_table = NULL;
-static khash_t(LINKS) *links_table = NULL;
+static hash_t(FILES) *files_table = NULL;
+static hash_t(ANCHORS) *anchors_table = NULL;
+static hash_t(LINKS) *links_table = NULL;
 
 static struct help_file *help_file_list[MAX_FILES];
 static int num_help_files = 0;
@@ -146,7 +150,7 @@ static char *expand_buffer(struct html_buffer *buffer, int required_length)
   while(buffer->alloc < required_length)
     buffer->alloc *= 2;
 
-  buffer->data = realloc(buffer->data, buffer->alloc);
+  buffer->data = crealloc(buffer->data, buffer->alloc);
   return buffer->data;
 }
 
@@ -181,11 +185,11 @@ static void append_file(struct help_file *current, const char *filename)
 static struct help_file *new_help_file(const char *title)
 {
   struct help_file *check;
-  struct help_file *current = calloc(1, sizeof(struct help_file));
+  struct help_file *current = ccalloc(1, sizeof(struct help_file));
   snprintf(current->name, MAX_FILE_NAME, "%s", title);
   current->name_length = strlen(current->name);
 
-  KHASH_FIND(FILES, files_table, current->name, current->name_length, check);
+  HASH_FIND(FILES, files_table, current->name, current->name_length, check);
   if(check)
   {
     fprintf(stderr, "WARNING: Duplicate file '%s' found. Please debug with "
@@ -196,7 +200,7 @@ static struct help_file *new_help_file(const char *title)
   }
   else
   {
-    KHASH_ADD(FILES, files_table, current);
+    HASH_ADD(FILES, files_table, current);
     help_file_list[num_help_files] = current;
     num_help_files++;
     return current;
@@ -207,12 +211,12 @@ static void free_help_files(void)
 {
   struct help_file *current;
 
-  KHASH_ITER(FILES, files_table, current, {
+  HASH_ITER(FILES, files_table, current, {
     free(current->html.data);
     free(current);
   });
 
-  KHASH_CLEAR(FILES, files_table);
+  HASH_CLEAR(FILES, files_table);
 }
 
 /**
@@ -222,12 +226,12 @@ static void free_help_files(void)
 static void new_anchor(struct help_file *parent, const char *name)
 {
   struct help_anchor *check;
-  struct help_anchor *anchor = calloc(1, sizeof(struct help_anchor));
+  struct help_anchor *anchor = ccalloc(1, sizeof(struct help_anchor));
   snprintf(anchor->name, MAX_ANCHOR_NAME, "%s", name);
   anchor->name_length = strlen(anchor->name);
   anchor->parent = parent;
 
-  KHASH_FIND(ANCHORS, anchors_table, anchor->name, anchor->name_length, check);
+  HASH_FIND(ANCHORS, anchors_table, anchor->name, anchor->name_length, check);
   if(check)
   {
     fprintf(stderr, "WARNING: Duplicate anchor '%s' found. Please debug with "
@@ -237,7 +241,7 @@ static void new_anchor(struct help_file *parent, const char *name)
   }
   else
   {
-    KHASH_ADD(ANCHORS, anchors_table, anchor);
+    HASH_ADD(ANCHORS, anchors_table, anchor);
   }
 }
 
@@ -245,11 +249,11 @@ static void free_anchors(void)
 {
   struct help_anchor *current;
 
-  KHASH_ITER(ANCHORS, anchors_table, current, {
+  HASH_ITER(ANCHORS, anchors_table, current, {
     free(current);
   });
 
-  KHASH_CLEAR(ANCHORS, anchors_table);
+  HASH_CLEAR(ANCHORS, anchors_table);
 }
 
 /**
@@ -259,7 +263,7 @@ static void free_anchors(void)
 static void new_link(struct help_file *parent, const char *name,
  const char *target_file, const char *target_anchor)
 {
-  struct help_link *link = calloc(1, sizeof(struct help_link));
+  struct help_link *link = ccalloc(1, sizeof(struct help_link));
   snprintf(link->name, MAX_ANCHOR_NAME, "%s", name);
   link->name_length = strlen(link->name);
   link->parent = parent;
@@ -268,7 +272,7 @@ static void new_link(struct help_file *parent, const char *name,
   snprintf(link->target_anchor, MAX_ANCHOR_NAME, "%s", target_anchor);
 
   // The name is generated with a unique number; don't bother checking.
-  KHASH_ADD(LINKS, links_table, link);
+  HASH_ADD(LINKS, links_table, link);
 }
 
 static void validate_links(void)
@@ -280,11 +284,11 @@ static void free_links(void)
 {
   struct help_link *current;
 
-  KHASH_ITER(LINKS, links_table, current, {
+  HASH_ITER(LINKS, links_table, current, {
     free(current);
   });
 
-  KHASH_CLEAR(LINKS, links_table);
+  HASH_CLEAR(LINKS, links_table);
 }
 
 /**
@@ -366,8 +370,13 @@ static void apply_color_codes(struct help_file *current)
   {
     buffer[0] = 'f';
     buffer[1] = current_fg_color_char;
-    buffer[2] = ' ';
-    buffer[3] = 0;
+    buffer[2] = 0;
+
+    if(current_bg_color_char > 0)
+    {
+      buffer[2] = ' ';
+      buffer[3] = 0;
+    }
     append_html(current, buffer);
   }
 
@@ -375,8 +384,7 @@ static void apply_color_codes(struct help_file *current)
   {
     buffer[0] = 'b';
     buffer[1] = current_bg_color_char;
-    buffer[2] = ' ';
-    buffer[3] = 0;
+    buffer[2] = 0;
     append_html(current, buffer);
   }
 
@@ -431,7 +439,7 @@ static struct help_file *parse_line(struct help_file *current, char *line)
 
       snprintf(buffer, MAX_ANCHOR_NAME, "%s__%s", current->name, label);
       new_anchor(current, buffer);
-      append_html(current, "<a class=\"helpanchor\" name=\"");
+      append_html(current, "<a class=\"hA\" name=\"");
       append_html(current, buffer);
       append_html(current, "\">");
       is_anchor = true;
@@ -471,7 +479,7 @@ static struct help_file *parse_line(struct help_file *current, char *line)
       snprintf(target_anchor, MAX_ANCHOR_NAME, "%s__%s", target_file, label);
       snprintf(buffer, MAX_ANCHOR_NAME, "%d__%s", (++link_count), label);
       new_link(current, buffer, target_file, target_anchor);
-      append_html(current, "<a class=\"helplink\" href=\"#");
+      append_html(current, "<a class=\"hL\" href=\"#");
       append_html(current, target_anchor);
       append_html(current, "\">");
       is_anchor = true;
@@ -481,7 +489,7 @@ static struct help_file *parse_line(struct help_file *current, char *line)
     case '$':
     {
       // Centered line.
-      append_html(current, "<p class=\"helpcentered\">");
+      append_html(current, "<p class=\"hC\">");
       is_centered = true;
       line++;
       break;
@@ -541,9 +549,27 @@ static struct help_file *parse_line(struct help_file *current, char *line)
       }
       else
       {
-        buffer[0] = cur;
-        buffer[1] = 0;
-        append_html(current, buffer);
+        // Certain chars need to be escaped to entities to display reliably.
+        switch(cur)
+        {
+          case '&':
+            append_html(current, "&amp;");
+            break;
+
+          case '<':
+            append_html(current, "&lt;");
+            break;
+
+          case '>':
+            append_html(current, "&gt;");
+            break;
+
+          default:
+            buffer[0] = cur;
+            buffer[1] = 0;
+            append_html(current, buffer);
+            break;
+        }
       }
     }
   }
@@ -570,11 +596,11 @@ static void parse_file(char *file_buffer, size_t file_length)
 {
   struct help_file *current = new_help_file("MAIN.HLP");
   char line_buffer[MAX_LINE];
-  char *src = file_buffer;
-  char *end = file_buffer + file_length;
+  struct memfile mf;
 
-  // No need to worry about \r at the end of the line-- memsafegets removes it.
-  while(memsafegets(line_buffer, MAX_LINE, &src, end))
+  mfopen(file_buffer, file_length, &mf);
+
+  while(mfsafegets(line_buffer, MAX_LINE, &mf))
     current = parse_line(current, line_buffer);
 
   // Make sure all links connect to a valid anchor.
@@ -602,8 +628,14 @@ static void write_html(const char *output)
 
   memset(&root, 0, sizeof(struct help_file));
 
+  append_html(&root, "<!DOCTYPE html>" EOL);
   append_html(&root, "<html>" EOL "<head>" EOL);
   append_html(&root, "<title>" TITLE "</title>" EOL);
+
+  append_html(&root, "<meta charset=\"UTF-8\">" EOL);
+  append_html(&root, "<meta name=\"title\" content=\"" TITLE "\">" EOL);
+  append_html(&root, "<meta name=\"twitter:card\" content=\"summary\">" EOL);
+  append_html(&root, "<meta name=\"twitter:title\" content=\"" TITLE "\">" EOL);
 
   append_html(&root, "<style>" EOL);
   append_file(&root, font_file);
@@ -633,15 +665,6 @@ static void write_html(const char *output)
     append_nav_url(&root, "COMMANDR.HLP", "1st", "Commands");
     append_nav_url(&root, "COUNTERS.HLP", "1st", "Counters");
     append_nav_url(&root, "NEWINVER.HLP", "1st", "Changelog");
-
-/*
-    // Since this will likely be embedded in an iframe, the printable version
-    // should open to a new page instead of attempting to open in the frame.
-    append_html(&root, " <li>"
-     "<a href=\"mzx_help_printable.html\" target=\"_blank\">"
-     "Printable Version</a></li>");
-*/
-
     append_html(&root, "</ul></div>" EOL "</div>" EOL EOL);
   }
   else
@@ -654,11 +677,11 @@ static void write_html(const char *output)
   for(i = 0; i < num_help_files; i++)
   {
     current = help_file_list[i];
-    append_html(&root, "<div class=\"helpfile\" id=\"");
+    append_html(&root, "<div class=\"hF\" id=\"");
     append_html(&root, current->name);
     append_html(&root, "\">" EOL);
     append_html(&root, current->html.data);
-    append_html(&root, EOL "<hr />" "</div>" EOL EOL);
+    append_html(&root, EOL "<hr>" "</div>" EOL EOL);
   }
 
   append_html(&root, "</div>" EOL "</body>" EOL "</html>" EOL);
@@ -679,7 +702,7 @@ int main(int argc, char *argv[])
 
   if(argc < 3)
   {
-    fprintf(stdout, usage);
+    fprintf(stdout, USAGE);
     exit(0);
   }
 

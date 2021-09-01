@@ -98,11 +98,12 @@
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
       <ConformanceMode>true</ConformanceMode>
-      <PreprocessorDefinitions>_ALLOW_KEYWORD_MACROS;CORE_LIBSPEC=__declspec(dllexport);PATH_MAX=1024;_USE_MATH_DEFINES;NEED_PNG_WRITE_SCREEN;_CRT_SECURE_NO_WARNINGS;__WIN32__;WIN32;DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>/J %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>_ALLOW_KEYWORD_MACROS;CORE_LIBSPEC=__declspec(dllexport);PATH_MAX=1024;_USE_MATH_DEFINES;NEED_PNG_WRITE_SCREEN;LIBXMP_NO_DEPACKERS;_CRT_SECURE_NO_WARNINGS;__WIN32__;WIN32;DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/J /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
       <SDLCheck>false</SDLCheck>
       <DisableSpecificWarnings>
       </DisableSpecificWarnings>
+      <LanguageStandard>stdcpp14</LanguageStandard>
     </ClCompile>
     <Link>
       <AdditionalDependencies>libogg.lib;libpng.lib;libvorbis.lib;libvorbisfile.lib;SDL2.lib;SDL2main.lib;zlib.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -121,11 +122,12 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
       <ConformanceMode>true</ConformanceMode>
-      <PreprocessorDefinitions>_ALLOW_KEYWORD_MACROS;CORE_LIBSPEC=__declspec(dllexport);PATH_MAX=1024;_USE_MATH_DEFINES;NEED_PNG_WRITE_SCREEN;_CRT_SECURE_NO_WARNINGS;__WIN32__;WIN32;DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>/J %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>_ALLOW_KEYWORD_MACROS;CORE_LIBSPEC=__declspec(dllexport);PATH_MAX=1024;_USE_MATH_DEFINES;NEED_PNG_WRITE_SCREEN;LIBXMP_NO_DEPACKERS;_CRT_SECURE_NO_WARNINGS;__WIN32__;WIN32;DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/J /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
       <SDLCheck>false</SDLCheck>
       <DisableSpecificWarnings>
       </DisableSpecificWarnings>
+      <LanguageStandard>stdcpp14</LanguageStandard>
     </ClCompile>
     <Link>
       <AdditionalDependencies>libogg.lib;libpng.lib;libvorbis.lib;libvorbisfile.lib;SDL2.lib;SDL2main.lib;zlib.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -146,9 +148,10 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <ConformanceMode>true</ConformanceMode>
-      <PreprocessorDefinitions>_ALLOW_KEYWORD_MACROS;CORE_LIBSPEC=__declspec(dllexport);PATH_MAX=1024;_USE_MATH_DEFINES;NEED_PNG_WRITE_SCREEN;_CRT_SECURE_NO_WARNINGS;__WIN32__;WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>/J %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>_ALLOW_KEYWORD_MACROS;CORE_LIBSPEC=__declspec(dllexport);PATH_MAX=1024;_USE_MATH_DEFINES;NEED_PNG_WRITE_SCREEN;LIBXMP_NO_DEPACKERS;_CRT_SECURE_NO_WARNINGS;__WIN32__;WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/J /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
       <SDLCheck>false</SDLCheck>
+      <LanguageStandard>stdcpp14</LanguageStandard>
     </ClCompile>
     <Link>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
@@ -171,9 +174,10 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <ConformanceMode>true</ConformanceMode>
-      <PreprocessorDefinitions>_ALLOW_KEYWORD_MACROS;CORE_LIBSPEC=__declspec(dllexport);PATH_MAX=1024;_USE_MATH_DEFINES;NEED_PNG_WRITE_SCREEN;_CRT_SECURE_NO_WARNINGS;__WIN32__;WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalOptions>/J %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>_ALLOW_KEYWORD_MACROS;CORE_LIBSPEC=__declspec(dllexport);PATH_MAX=1024;_USE_MATH_DEFINES;NEED_PNG_WRITE_SCREEN;LIBXMP_NO_DEPACKERS;_CRT_SECURE_NO_WARNINGS;__WIN32__;WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>/J /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
       <SDLCheck>false</SDLCheck>
+      <LanguageStandard>stdcpp14</LanguageStandard>
     </ClCompile>
     <Link>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
@@ -225,7 +229,6 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClCompile Include="..\..\contrib\libxmp\src\effects.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\extras.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\filter.c" />
-    <ClCompile Include="..\..\contrib\libxmp\src\fnmatch.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\format.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\hio.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\hmn_extras.c" />
@@ -233,13 +236,13 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClCompile Include="..\..\contrib\libxmp\src\load.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\669_load.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\amf_load.c" />
-    <ClCompile Include="..\..\contrib\libxmp\src\loaders\asif.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\asylum_load.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\common.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\far_load.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\flt_load.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\gdm_load.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\hmn_load.c" />
+    <ClCompile Include="..\..\contrib\libxmp\src\loaders\ice_load.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\iff.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\itsex.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\it_load.c" />
@@ -257,7 +260,6 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\stm_load.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\st_load.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\ult_load.c" />
-    <ClCompile Include="..\..\contrib\libxmp\src\loaders\voltable.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\loaders\xm_load.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\load_helpers.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\md5.c" />
@@ -265,13 +267,13 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClCompile Include="..\..\contrib\libxmp\src\memio.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\mixer.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\mix_all.c" />
-    <ClCompile Include="..\..\contrib\libxmp\src\mix_paula.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\period.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\player.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\read_event.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\scan.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\smix.c" />
     <ClCompile Include="..\..\contrib\libxmp\src\virtual.c" />
+    <ClCompile Include="..\..\contrib\libxmp\src\xfnmatch.c" />
     <ClCompile Include="..\..\src\audio\audio.c" />
     <ClCompile Include="..\..\src\audio\audio_pcs.c" />
     <ClCompile Include="..\..\src\audio\audio_reality.cpp" />
@@ -280,7 +282,7 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClCompile Include="..\..\src\audio\audio_wav.c" />
     <ClCompile Include="..\..\src\audio\audio_xmp.c" />
     <ClCompile Include="..\..\src\audio\ext.c" />
-    <ClCompile Include="..\..\src\audio\sampled_stream.c" />
+    <ClCompile Include="..\..\src\audio\sampled_stream.cpp" />
     <ClCompile Include="..\..\src\audio\sfx.c" />
     <ClCompile Include="..\..\src\block.c" />
     <ClCompile Include="..\..\src\board.c" />
@@ -293,7 +295,6 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClCompile Include="..\..\src\event.c" />
     <ClCompile Include="..\..\src\event_sdl.c" />
     <ClCompile Include="..\..\src\expr.c" />
-    <ClCompile Include="..\..\src\fsafeopen.c" />
     <ClCompile Include="..\..\src\game.c" />
     <ClCompile Include="..\..\src\game_menu.c" />
     <ClCompile Include="..\..\src\game_ops.c" />
@@ -306,6 +307,11 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClCompile Include="..\..\src\idput.c" />
     <ClCompile Include="..\..\src\intake.c" />
     <ClCompile Include="..\..\src\intake_num.c" />
+    <ClCompile Include="..\..\src\io\fsafeopen.c" />
+    <ClCompile Include="..\..\src\io\path.c" />
+    <ClCompile Include="..\..\src\io\vio.c" />
+    <ClCompile Include="..\..\src\io\zip.c" />
+    <ClCompile Include="..\..\src\io\zip_stream.c" />
     <ClCompile Include="..\..\src\legacy_board.c" />
     <ClCompile Include="..\..\src\legacy_rasm.c" />
     <ClCompile Include="..\..\src\legacy_robot.c" />
@@ -318,7 +324,7 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClCompile Include="..\..\src\render_gl1.c" />
     <ClCompile Include="..\..\src\render_gl2.c" />
     <ClCompile Include="..\..\src\render_glsl.c" />
-    <ClCompile Include="..\..\src\render_layer.c" />
+    <ClCompile Include="..\..\src\render_layer.cpp" />
     <ClCompile Include="..\..\src\render_sdl.c" />
     <ClCompile Include="..\..\src\render_soft.c" />
     <ClCompile Include="..\..\src\render_softscale.c" />
@@ -331,7 +337,6 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClCompile Include="..\..\src\util.c" />
     <ClCompile Include="..\..\src\window.c" />
     <ClCompile Include="..\..\src\world.c" />
-    <ClCompile Include="..\..\src\zip.c" />
     <ClCompile Include="win32time.c" />
   </ItemGroup>
   <ItemGroup>
@@ -344,13 +349,11 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClInclude Include="..\..\contrib\libxmp\src\common.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\effects.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\extras.h" />
-    <ClInclude Include="..\..\contrib\libxmp\src\fnmatch.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\format.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\hio.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\hmn_extras.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\lfo.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\list.h" />
-    <ClInclude Include="..\..\contrib\libxmp\src\loaders\asif.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\loaders\iff.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\loaders\it.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\loaders\loader.h" />
@@ -363,15 +366,14 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClInclude Include="..\..\contrib\libxmp\src\med_extras.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\memio.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\mixer.h" />
-    <ClInclude Include="..\..\contrib\libxmp\src\paula.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\period.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\player.h" />
-    <ClInclude Include="..\..\contrib\libxmp\src\precomp_blep.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\precomp_lut.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\virtual.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\win32\osdcomm.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\win32\ptpopen.h" />
     <ClInclude Include="..\..\contrib\libxmp\src\win32\unistd.h" />
+    <ClInclude Include="..\..\contrib\libxmp\src\xfnmatch.h" />
     <ClInclude Include="..\..\src\audio\audio.h" />
     <ClInclude Include="..\..\src\audio\audio_pcs.h" />
     <ClInclude Include="..\..\src\audio\audio_reality.h" />
@@ -393,18 +395,33 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClInclude Include="..\..\src\error.h" />
     <ClInclude Include="..\..\src\event.h" />
     <ClInclude Include="..\..\src\expr.h" />
-    <ClInclude Include="..\..\src\fsafeopen.h" />
     <ClInclude Include="..\..\src\game.h" />
     <ClInclude Include="..\..\src\game_menu.h" />
     <ClInclude Include="..\..\src\game_ops.h" />
     <ClInclude Include="..\..\src\game_player.h" />
     <ClInclude Include="..\..\src\game_update.h" />
     <ClInclude Include="..\..\src\graphics.h" />
+    <ClInclude Include="..\..\src\hashtable.h" />
     <ClInclude Include="..\..\src\helpsys.h" />
     <ClInclude Include="..\..\src\idarray.h" />
     <ClInclude Include="..\..\src\idput.h" />
     <ClInclude Include="..\..\src\intake.h" />
     <ClInclude Include="..\..\src\intake_num.h" />
+    <ClInclude Include="..\..\src\io\bitstream.h" />
+    <ClInclude Include="..\..\src\io\fsafeopen.h" />
+    <ClInclude Include="..\..\src\io\memfile.h" />
+    <ClInclude Include="..\..\src\io\path.h" />
+    <ClInclude Include="..\..\src\io\vfile.h" />
+    <ClInclude Include="..\..\src\io\vio.h" />
+    <ClInclude Include="..\..\src\io\vio_win32.h" />
+    <ClInclude Include="..\..\src\io\zip.h" />
+    <ClInclude Include="..\..\src\io\zip_deflate.h" />
+    <ClInclude Include="..\..\src\io\zip_deflate64.h" />
+    <ClInclude Include="..\..\src\io\zip_dict.h" />
+    <ClInclude Include="..\..\src\io\zip_implode.h" />
+    <ClInclude Include="..\..\src\io\zip_reduce.h" />
+    <ClInclude Include="..\..\src\io\zip_shrink.h" />
+    <ClInclude Include="..\..\src\io\zip_stream.h" />
     <ClInclude Include="..\..\src\keysym.h" />
     <ClInclude Include="..\..\src\legacy_board.h" />
     <ClInclude Include="..\..\src\legacy_rasm.h" />
@@ -418,6 +435,7 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClInclude Include="..\..\src\renderers.h" />
     <ClInclude Include="..\..\src\render_gl.h" />
     <ClInclude Include="..\..\src\render_layer.h" />
+    <ClInclude Include="..\..\src\render_layer_code.hpp" />
     <ClInclude Include="..\..\src\render_sdl.h" />
     <ClInclude Include="..\..\src\robot.h" />
     <ClInclude Include="..\..\src\robot_struct.h" />
@@ -430,7 +448,6 @@ echo #define VERSION_DATE " ($(BuildDate))"&gt;&gt;$(SolutionDir)version.h</Comm
     <ClInclude Include="..\..\src\window.h" />
     <ClInclude Include="..\..\src\world.h" />
     <ClInclude Include="..\..\src\world_struct.h" />
-    <ClInclude Include="..\..\src\zip.h" />
     <ClInclude Include="config.h" />
     <ClInclude Include="dirent.h" />
     <ClInclude Include="msvc.h" />

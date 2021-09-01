@@ -4,6 +4,9 @@ AR      = emar
 OBJCOPY = /bin/true
 STRIP   = /bin/true
 
+# Disable rules that require target code to run natively.
+SUPPRESS_HOST_TARGETS ?= 1
+
 SDL_CFLAGS = -s USE_SDL=2
 SDL_LDFLAGS = -s USE_SDL=2
 
@@ -28,13 +31,16 @@ ifeq (${BUILD_RENDER_GL_PROGRAM},1)
 	ARCH_LDFLAGS += -s FULL_ES2=1
 endif
 
-ARCH_LDFLAGS += -s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=32768
+ARCH_LDFLAGS += -s ASYNCIFY=1 -s ASYNCIFY_STACK_SIZE=1048576
 # TODO: Removing the whitelist should allow the editor to work.
 ARCH_LDFLAGS += -s ASYNCIFY_WHITELIST=@arch/emscripten/whitelist.json
 ARCH_LDFLAGS += -s 'ASYNCIFY_IMPORTS=["emscripten_sleep"]'
 
 ARCH_CFLAGS += -s ENVIRONMENT=web
 ARCH_LDFLAGS += -s ENVIRONMENT=web
+
+# Fix warnings caused by broken Emscripten macros.
+ARCH_CFLAGS += -Wno-gnu-zero-variadic-macro-arguments
 
 # Enable source map for debugging if this is supplied by the user.
 ifneq (${SOURCE_MAP_BASE},)
@@ -57,10 +63,27 @@ clean:
 	$(if ${V},,@echo "  RM       mzxrun.js.mem")
 	$(if ${V},,@echo "  RM       mzxrun.wasm")
 	$(if ${V},,@echo "  RM       mzxrun.wasm.map")
-	@rm -rf mzxrun.js.mem mzxrun.js.orig.js mzxrun.wasm mzxrun.wasm.map
+	$(if ${V},,@echo "  RM       emzip.js")
+	@rm -rf mzxrun.js.mem mzxrun.js.orig.js mzxrun.wasm mzxrun.wasm.map emzip.js* emzip.wasm
 
-# Normally not defined yet...
-build := build/${SUBPLATFORM}
+all: emzip.js
+
+# NOTE: hack, core_obj and io_obj aren't defined yet...
+emzip_objs := \
+  src/.build/util.o \
+  src/io/.build/vio.o \
+  src/io/.build/zip.o \
+  src/io/.build/zip_stream.o
+
+emzip.js: arch/emscripten/emzip.c ${emzip_objs}
+	$(if ${V},,@echo "  LINK    " $@)
+	${CC} -O3 \
+	-s ENVIRONMENT=web \
+	-s ALLOW_MEMORY_GROWTH=1 \
+	-s MODULARIZE=1 \
+	-s EXPORT_NAME="'emzip'" \
+	-s "EXPORTED_RUNTIME_METHODS=['_main', 'UTF8ToString']" \
+	$< ${emzip_objs} ${ZLIB_LDFLAGS} -o $@
 
 ${build}/mzxrun.js: ${build}
 	@cp mzxrun.js ${build}/
@@ -69,7 +92,13 @@ ${build}/mzxrun.wasm: ${build}
 	@cp mzxrun.wasm ${build}/
 	@(if [ -f mzxrun.wasm.map ]; then cp mzxrun.wasm.map ${build}/ && rm -rf ${build}/src && cp -r src/ ${build}/; fi)
 
-build: ${build} ${build}/mzxrun.js ${build}/mzxrun.wasm ${build}/assets
+${build}/emzip.js: ${build} emzip.js ${build}/emzip.wasm
+	@cp emzip.js ${build}/
+
+${build}/emzip.wasm: ${build}
+	@cp emzip.wasm ${build}/
+
+build: ${build} ${build}/mzxrun.js ${build}/mzxrun.wasm ${build}/assets ${build}/emzip.js
 	@rm -rf ${build}/config.txt
 	@(if [ -d ${build}/assets ]; then cd ${build} && rm -rf assets.zip && zip -9 -r assets.zip assets/ && rm -r assets/; fi)
 	@(if [ ! -d "arch/emscripten/web/node_modules" ]; then cd arch/emscripten/web && npm install; fi)

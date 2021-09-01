@@ -4,6 +4,9 @@
 #ifdef _MSC_VER
 #define __inline__ __inline
 #endif
+#ifdef __WATCOMC__
+#define __inline__   inline
+#endif
 
 /*
  * Simple doubly linked list implementation.
@@ -130,7 +133,7 @@ static __inline__ void list_splice(struct list_head *list, struct list_head *hea
  * @member:	the name of the list_struct within the struct.
  */
 #define list_entry(ptr, type, member) \
-	((type *)((char *)(ptr)-(size_t)(&((type *)0)->member)))
+	((type *)((char *)(ptr) - offsetof(type, member)))
 
 /**
  * list_for_each	-	iterate over a list

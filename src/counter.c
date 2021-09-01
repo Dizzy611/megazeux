@@ -20,13 +20,14 @@
 // New counter.cpp. Sorted lists make for faster searching.
 // Builtins are also cleaned up by being put on a seperate list.
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
 #include <math.h>
 #include <ctype.h>
+#include <limits.h>
 #include <time.h>
-#include <sys/stat.h>
 
 #ifdef _MSC_VER
 #include "win32time.h"
@@ -34,12 +35,13 @@
 #include <sys/time.h>
 #endif /* _MSC_VER */
 
+#include "board.h"
 #include "configure.h"
 #include "counter.h"
 #include "data.h"
 #include "error.h"
 #include "event.h"
-#include "fsafeopen.h"
+#include "expr.h"
 #include "game_ops.h"
 #include "graphics.h"
 #include "idarray.h"
@@ -51,6 +53,8 @@
 #include "util.h"
 #include "world.h"
 #include "world_struct.h"
+#include "io/fsafeopen.h"
+#include "io/vio.h"
 
 #include "audio/audio.h"
 
@@ -60,9 +64,9 @@
  * all counter names.
  */
 
-#ifdef CONFIG_KHASH
-#include <khashmzx.h>
-KHASH_SET_INIT(COUNTER, struct counter *, name, name_length)
+#ifdef CONFIG_COUNTER_HASH_TABLES
+#include "hashtable.h"
+HASH_SET_INIT(COUNTER, struct counter *, name, name_length)
 #endif
 
 #ifndef M_PI
@@ -129,13 +133,19 @@ static int translate_coordinates(const char *src, unsigned int *x,
 static int string_counter_read(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int id)
 {
-  return string_read_as_counter(mzx_world, name, id);
+  // TODO: the only uses of get_counter() that can make it here should be using
+  // a temporary buffer already, so this cast should be safe... however, it is
+  // still very tacky.
+  return string_read_as_counter(mzx_world, (char *)name, id);
 }
 
 static void string_counter_write(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int value, int id)
 {
-  string_write_as_counter(mzx_world, name, value, id);
+  // TODO: the only uses of set_counter() that can make it here should be using
+  // a temporary buffer already, so this cast should be safe... however, it is
+  // still very tacky.
+  string_write_as_counter(mzx_world, (char *)name, value, id);
 }
 
 static int local_read(struct world *mzx_world,
@@ -1153,8 +1163,10 @@ static int input_read(struct world *mzx_world,
 static void input_write(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int value, int id)
 {
+  char buf[12];
+  sprintf(buf, "%d", value);
+  board_set_input_string(mzx_world->current_board, buf, strlen(buf));
   mzx_world->current_board->num_input = value;
-  sprintf(mzx_world->current_board->input_string, "%d", value);
 }
 
 static int key_read(struct world *mzx_world,
@@ -1215,7 +1227,7 @@ static int joyn_read(struct world *mzx_world,
   char *dot_ptr;
   int joystick = strtol(name + 3, &dot_ptr, 10) - 1;
   boolean is_active;
-  Sint16 value;
+  int16_t value;
 
   if(*dot_ptr == '.')
   {
@@ -1677,33 +1689,54 @@ static void upr_write(struct world *mzx_world,
 static int char_byte_read(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int id)
 {
-  Uint16 char_num = get_counter(mzx_world, "CHAR", id);
+  uint16_t char_num = get_counter(mzx_world, "CHAR", id);
+  uint8_t byte_num = get_counter(mzx_world, "BYTE", id);
 
-  // Prior to 2.90 char params are clipped
-  if(mzx_world->version < V290) char_num &= 0xFF;
+  // Prior to 2.90 char params are clipped.
+  if(mzx_world->version < V290)
+    char_num &= 0xFF;
 
-  return ec_read_byte(char_num,
-   get_counter(mzx_world, "BYTE", id));
+  if(byte_num >= 14)
+  {
+    // Old port releases are missing a bounds check (see: Day of Zeux Invitation).
+    if(mzx_world->version >= VERSION_PORT && mzx_world->version < V292)
+      char_num += byte_num / 14;
+
+    byte_num %= 14;
+  }
+
+  return ec_read_byte(char_num, byte_num);
 }
 
 static void char_byte_write(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int value, int id)
 {
-  Uint16 char_num = get_counter(mzx_world, "CHAR", id);
+  uint16_t char_num = get_counter(mzx_world, "CHAR", id);
+  uint8_t byte_num = get_counter(mzx_world, "BYTE", id);
 
-  // Prior to 2.90 char params are clipped
-  if(mzx_world->version < V290) char_num &= 0xFF;
-  if(char_num > 0xFF && !layer_renderer_check(true)) return;
+  // Prior to 2.90 char params are clipped.
+  if(mzx_world->version < V290)
+    char_num &= 0xFF;
 
-  ec_change_byte(char_num,
-   get_counter(mzx_world, "BYTE", id), value);
+  if(byte_num >= 14)
+  {
+    // Old port releases are missing a bounds check (see: Day of Zeux Invitation).
+    // This may write the byte into the extended charsets, which doesn't really
+    // matter for these games (and is better than corrupting the protected set).
+    if(mzx_world->version >= VERSION_PORT && mzx_world->version < V292)
+      char_num += byte_num / 14;
+
+    byte_num %= 14;
+  }
+
+  ec_change_byte(char_num, byte_num, value);
 }
 
 static int pixel_read(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int id)
 {
-  int pixel_x = CLAMP(get_counter(mzx_world, "CHAR_X", id), 0, 256);
-  int pixel_y = CLAMP(get_counter(mzx_world, "CHAR_Y", id), 0, 112);
+  int pixel_x = CLAMP(get_counter(mzx_world, "CHAR_X", id), 0, 255);
+  int pixel_y = CLAMP(get_counter(mzx_world, "CHAR_Y", id), 0, 111);
   char sub_x, sub_y, current_byte, current_char;
   int pixel_mask;
 
@@ -1719,8 +1752,8 @@ static int pixel_read(struct world *mzx_world,
 static void pixel_write(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int value, int id)
 {
-  int pixel_x = CLAMP(get_counter(mzx_world, "CHAR_X", id), 0, 256);
-  int pixel_y = CLAMP(get_counter(mzx_world, "CHAR_Y", id), 0, 112);
+  int pixel_x = CLAMP(get_counter(mzx_world, "CHAR_X", id), 0, 255);
+  int pixel_y = CLAMP(get_counter(mzx_world, "CHAR_Y", id), 0, 111);
   char sub_x, sub_y, current_byte, current_char;
 
   sub_x = pixel_x & 7;
@@ -1955,7 +1988,7 @@ static int fread_read(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int id)
 {
   if(!mzx_world->input_is_dir && mzx_world->input_file)
-    return fgetc(mzx_world->input_file);
+    return vfgetc(mzx_world->input_file);
   return -1;
 }
 
@@ -1965,9 +1998,9 @@ static int fread_counter_read(struct world *mzx_world,
   if(!mzx_world->input_is_dir && mzx_world->input_file)
   {
     if(mzx_world->version < V282)
-      return fgetw(mzx_world->input_file);
+      return vfgetw(mzx_world->input_file);
     else
-      return fgetd(mzx_world->input_file);
+      return vfgetd(mzx_world->input_file);
   }
   return -1;
 }
@@ -1976,9 +2009,15 @@ static int fread_pos_read(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int id)
 {
   if(!mzx_world->input_is_dir && mzx_world->input_file)
-    return ftell(mzx_world->input_file);
-  else if(mzx_world->input_is_dir)
-    return dir_tell(&mzx_world->input_directory);
+  {
+    return vftell(mzx_world->input_file);
+  }
+  else
+
+  if(mzx_world->input_is_dir)
+  {
+    return vdir_tell(mzx_world->input_directory);
+  }
   else
     return -1;
 }
@@ -1989,14 +2028,14 @@ static void fread_pos_write(struct world *mzx_world,
   if(!mzx_world->input_is_dir && mzx_world->input_file)
   {
     if(value == -1)
-      fseek(mzx_world->input_file, 0, SEEK_END);
+      vfseek(mzx_world->input_file, 0, SEEK_END);
     else
-      fseek(mzx_world->input_file, value, SEEK_SET);
+      vfseek(mzx_world->input_file, value, SEEK_SET);
   }
   else if(mzx_world->input_is_dir)
   {
     if(value >= 0)
-      dir_seek(&mzx_world->input_directory, value);
+      vdir_seek(mzx_world->input_directory, value);
   }
 }
 
@@ -2004,25 +2043,11 @@ static int fread_length_read(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int id)
 {
   if(mzx_world->input_is_dir)
-    return mzx_world->input_directory.entries;
+    return vdir_length(mzx_world->input_directory);
 
   if(mzx_world->input_file)
-  {
-    struct stat stat_info;
-    long current_pos;
-    long length;
+    return vfilelength(mzx_world->input_file, false);
 
-    // Since this is read-only, this info is likely accurate and faster to get.
-    if(!fstat(fileno(mzx_world->input_file), &stat_info))
-      return stat_info.st_size;
-
-    // Fall back to SEEK_END/ftell
-    current_pos = ftell(mzx_world->input_file);
-    fseek(mzx_world->input_file, 0, SEEK_END);
-    length = ftell(mzx_world->input_file);
-    fseek(mzx_world->input_file, current_pos, SEEK_SET);
-    return length;
-  }
   return -1;
 }
 
@@ -2042,7 +2067,7 @@ static int fwrite_pos_read(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int id)
 {
   if(mzx_world->output_file)
-    return ftell(mzx_world->output_file);
+    return vftell(mzx_world->output_file);
   else
     return -1;
 }
@@ -2053,9 +2078,9 @@ static void fwrite_pos_write(struct world *mzx_world,
   if(mzx_world->output_file)
   {
     if(value == -1)
-      fseek(mzx_world->output_file, 0, SEEK_END);
+      vfseek(mzx_world->output_file, 0, SEEK_END);
     else
-      fseek(mzx_world->output_file, value, SEEK_SET);
+      vfseek(mzx_world->output_file, value, SEEK_SET);
   }
 }
 
@@ -2063,7 +2088,7 @@ static void fwrite_write(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int value, int id)
 {
   if(mzx_world->output_file)
-    fputc(value, mzx_world->output_file);
+    vfputc(value, mzx_world->output_file);
 }
 
 static void fwrite_counter_write(struct world *mzx_world,
@@ -2072,9 +2097,9 @@ static void fwrite_counter_write(struct world *mzx_world,
   if(mzx_world->output_file)
   {
     if(mzx_world->version < V282)
-      fputw(value, mzx_world->output_file);
+      vfputw(value, mzx_world->output_file);
     else
-      fputd(value, mzx_world->output_file);
+      vfputd(value, mzx_world->output_file);
   }
 }
 
@@ -2082,17 +2107,8 @@ static int fwrite_length_read(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int id)
 {
   if(mzx_world->output_file)
-  {
-    // Since this can change without updating the file on disk, the easiest
-    // way to get this value is SEEK_END/ftell.
-    long current_pos = ftell(mzx_world->output_file);
-    long length;
+    return vfilelength(mzx_world->output_file, false);
 
-    fseek(mzx_world->output_file, 0, SEEK_END);
-    length = ftell(mzx_world->output_file);
-    fseek(mzx_world->output_file, current_pos, SEEK_SET);
-    return length;
-  }
   return -1;
 }
 
@@ -2365,13 +2381,13 @@ static void mousey_write(struct world *mzx_world,
 static int mousepx_read(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int id)
 {
-  return get_real_mouse_x();
+  return get_mouse_pixel_x();
 }
 
 static int mousepy_read(struct world *mzx_world,
  const struct function_counter *counter, const char *name, int id)
 {
-  return get_real_mouse_y();
+  return get_mouse_pixel_y();
 }
 
 static void mousepx_write(struct world *mzx_world,
@@ -2383,7 +2399,7 @@ static void mousepx_write(struct world *mzx_world,
   if(value < 0)
     value = 0;
 
-  warp_real_mouse_x(value);
+  warp_mouse_pixel_x(value);
 }
 
 static void mousepy_write(struct world *mzx_world,
@@ -2395,7 +2411,7 @@ static void mousepy_write(struct world *mzx_world,
   if(value < 0)
     value = 0;
 
-  warp_real_mouse_y(value);
+  warp_mouse_pixel_y(value);
 }
 
 static int mboardx_read(struct world *mzx_world,
@@ -2885,25 +2901,29 @@ int set_counter_special(struct world *mzx_world, char *char_value,
 
         if(!mzx_world->input_is_dir && mzx_world->input_file)
         {
-          fclose(mzx_world->input_file);
+          vfclose(mzx_world->input_file);
           mzx_world->input_file = NULL;
         }
 
         if(mzx_world->input_is_dir)
         {
-          dir_close(&mzx_world->input_directory);
+          vdir_close(mzx_world->input_directory);
+          mzx_world->input_directory = NULL;
           mzx_world->input_is_dir = false;
         }
 
-        err = fsafetranslate(char_value, translated_path);
+        err = fsafetranslate(char_value, translated_path, MAX_PATH);
 
         if(err == -FSAFE_MATCHED_DIRECTORY)
         {
-          if(dir_open(&mzx_world->input_directory, translated_path))
+          mzx_world->input_directory = vdir_open(translated_path);
+          if(mzx_world->input_directory)
             mzx_world->input_is_dir = true;
         }
-        else if(err == -FSAFE_SUCCESS)
-          mzx_world->input_file = fopen_unsafe(translated_path, "rb");
+        else
+
+        if(err == -FSAFE_SUCCESS)
+          mzx_world->input_file = vfopen_unsafe(translated_path, "rb");
 
         if(mzx_world->input_file || mzx_world->input_is_dir)
           strcpy(mzx_world->input_file_name, translated_path);
@@ -2914,13 +2934,14 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       {
         if(!mzx_world->input_is_dir && mzx_world->input_file)
         {
-          fclose(mzx_world->input_file);
+          vfclose(mzx_world->input_file);
           mzx_world->input_file = NULL;
         }
 
         if(mzx_world->input_is_dir)
         {
-          dir_close(&mzx_world->input_directory);
+          vdir_close(mzx_world->input_directory);
+          mzx_world->input_directory = NULL;
           mzx_world->input_is_dir = false;
         }
       }
@@ -2935,7 +2956,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       if(char_value[0])
       {
         if(mzx_world->output_file)
-          fclose(mzx_world->output_file);
+          vfclose(mzx_world->output_file);
 
         mzx_world->output_file = fsafeopen(char_value, "wb");
         if(mzx_world->output_file)
@@ -2945,7 +2966,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       {
         if(mzx_world->output_file)
         {
-          fclose(mzx_world->output_file);
+          vfclose(mzx_world->output_file);
           mzx_world->output_file = NULL;
         }
       }
@@ -2960,7 +2981,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       if(char_value[0])
       {
         if(mzx_world->output_file)
-          fclose(mzx_world->output_file);
+          vfclose(mzx_world->output_file);
 
         mzx_world->output_file = fsafeopen(char_value, "ab");
         if(mzx_world->output_file)
@@ -2970,7 +2991,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       {
         if(mzx_world->output_file)
         {
-          fclose(mzx_world->output_file);
+          vfclose(mzx_world->output_file);
           mzx_world->output_file = NULL;
         }
       }
@@ -2985,7 +3006,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       if(char_value[0])
       {
         if(mzx_world->output_file)
-          fclose(mzx_world->output_file);
+          vfclose(mzx_world->output_file);
 
         mzx_world->output_file = fsafeopen(char_value, "r+b");
         if(mzx_world->output_file)
@@ -2995,7 +3016,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       {
         if(mzx_world->output_file)
         {
-          fclose(mzx_world->output_file);
+          vfclose(mzx_world->output_file);
           mzx_world->output_file = NULL;
         }
       }
@@ -3008,7 +3029,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       char *translated_path = cmalloc(MAX_PATH);
       int err;
 
-      err = fsafetranslate(char_value, translated_path);
+      err = fsafetranslate(char_value, translated_path, MAX_PATH);
 
       if(err == -FSAFE_SUCCESS)
         load_palette(translated_path);
@@ -3022,7 +3043,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       char *translated_path = cmalloc(MAX_PATH);
       int err;
 
-      err = fsafetranslate(char_value, translated_path);
+      err = fsafetranslate(char_value, translated_path, MAX_PATH);
 
       if(err == -FSAFE_SUCCESS)
         load_index_file(translated_path);
@@ -3036,7 +3057,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       char *translated_path = cmalloc(MAX_PATH);
       int err;
 
-      err = fsafetranslate(char_value, translated_path);
+      err = fsafetranslate(char_value, translated_path, MAX_PATH);
       if(err == -FSAFE_SUCCESS || err == -FSAFE_MATCH_FAILED)
         save_counters_file(mzx_world, translated_path);
 
@@ -3049,7 +3070,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       char *translated_path = cmalloc(MAX_PATH);
       int err;
 
-      err = fsafetranslate(char_value, translated_path);
+      err = fsafetranslate(char_value, translated_path, MAX_PATH);
       if(err == -FSAFE_SUCCESS)
         load_counters_file(mzx_world, translated_path);
 
@@ -3073,7 +3094,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
           cur_robot->program_bytecode[cur_robot->cur_prog_line] + 2;
         }
 
-        err = fsafetranslate(char_value, translated_path);
+        err = fsafetranslate(char_value, translated_path, MAX_PATH);
         if(err == -FSAFE_SUCCESS || err == -FSAFE_MATCH_FAILED)
           save_world(mzx_world, translated_path, true, MZX_VERSION);
 
@@ -3084,7 +3105,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
         // From 2.90 onward, save_game takes place at the end
         // of the cycle
         mzx_world->robotic_save_type = SAVE_NONE;
-        err = fsafetranslate(char_value, mzx_world->robotic_save_path);
+        err = fsafetranslate(char_value, mzx_world->robotic_save_path, MAX_PATH);
         if(err == -FSAFE_SUCCESS || err == -FSAFE_MATCH_FAILED)
           mzx_world->robotic_save_type = SAVE_GAME;
       }
@@ -3096,7 +3117,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       char *translated_path = cmalloc(MAX_PATH);
       boolean faded;
 
-      if(!fsafetranslate(char_value, translated_path))
+      if(!fsafetranslate(char_value, translated_path, MAX_PATH))
       {
         if(reload_savegame(mzx_world, translated_path, &faded))
         {
@@ -3133,19 +3154,19 @@ int set_counter_special(struct world *mzx_world, char *char_value,
         // translated into actual commands eventually.
         if(mzx_world->version >= VERSION_SOURCE)
         {
-          FILE *fp = fsafeopen(char_value, "rb");
-          if(fp)
+          vfile *vf = fsafeopen(char_value, "rb");
+          if(vf)
           {
-            new_length = ftell_and_rewind(fp);
+            new_length = vfilelength(vf, true);
             new_source = cmalloc(new_length + 1);
             new_source[new_length] = 0;
 
-            if(!fread(new_source, new_length, 1, fp))
+            if(!vfread(new_source, new_length, 1, vf))
             {
               free(new_source);
               new_source = NULL;
             }
-            fclose(fp);
+            vfclose(vf);
           }
         }
         else
@@ -3189,7 +3210,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
       // It's basically like LOAD_ROBOT except that it first has to disassmble
       // the bytecode.
 
-      FILE *bc_file = fsafeopen(char_value, "rb");
+      vfile *bc_file = fsafeopen(char_value, "rb");
 
       if(bc_file)
       {
@@ -3198,10 +3219,10 @@ int set_counter_special(struct world *mzx_world, char *char_value,
 
         if(cur_robot)
         {
-          int program_bytecode_length = ftell_and_rewind(bc_file);
+          int program_bytecode_length = vfilelength(bc_file, true);
           char *program_legacy_bytecode = malloc(program_bytecode_length + 1);
 
-          fread(program_legacy_bytecode, program_bytecode_length, 1,
+          vfread(program_legacy_bytecode, program_bytecode_length, 1,
            bc_file);
 
           if(!validate_legacy_bytecode(&program_legacy_bytecode,
@@ -3233,12 +3254,12 @@ int set_counter_special(struct world *mzx_world, char *char_value,
           // OR LOAD_BCn was used where n is &robot_id&.
           if(value == -1 || value == id)
           {
-            fclose(bc_file);
+            vfclose(bc_file);
             return 1;
           }
         }
 
-        fclose(bc_file);
+        vfclose(bc_file);
       }
       break;
     }
@@ -3255,14 +3276,14 @@ int set_counter_special(struct world *mzx_world, char *char_value,
 
       if(cur_robot && cur_robot->program_source)
       {
-        FILE *fp = fsafeopen(char_value, "wb");
+        vfile *vf = fsafeopen(char_value, "wb");
         size_t len = cur_robot->program_source_length;
 
-        if(fp)
+        if(vf)
         {
           // TODO: this doesn't apply zaps...
-          fwrite(cur_robot->program_source, len, 1, fp);
-          fclose(fp);
+          vfwrite(cur_robot->program_source, len, 1, vf);
+          vfclose(vf);
         }
       }
       break;
@@ -3328,7 +3349,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
 
     case FOPEN_LOAD_BC:
     {
-      FILE *bc_file = fsafeopen(char_value, "rb");
+      vfile *bc_file = fsafeopen(char_value, "rb");
 
       if(bc_file)
       {
@@ -3337,10 +3358,10 @@ int set_counter_special(struct world *mzx_world, char *char_value,
 
         if(cur_robot)
         {
-          int new_size = ftell_and_rewind(bc_file);
+          int new_size = vfilelength(bc_file, true);
           char *program_bytecode = malloc(new_size + 1);
 
-          if(!fread(program_bytecode, new_size, 1, bc_file))
+          if(!vfread(program_bytecode, new_size, 1, bc_file))
           {
             free(program_bytecode);
             break;
@@ -3375,12 +3396,12 @@ int set_counter_special(struct world *mzx_world, char *char_value,
           // OR LOAD_BCn was used where n is &robot_id&.
           if(value == -1 || value == id)
           {
-            fclose(bc_file);
+            vfclose(bc_file);
             return 1;
           }
         }
 
-        fclose(bc_file);
+        vfclose(bc_file);
       }
       break;
     }
@@ -3401,7 +3422,7 @@ int set_counter_special(struct world *mzx_world, char *char_value,
 
     case FOPEN_SAVE_BC:
     {
-      FILE *bc_file = fsafeopen(char_value, "wb");
+      vfile *bc_file = fsafeopen(char_value, "wb");
 
       if(bc_file)
       {
@@ -3410,11 +3431,11 @@ int set_counter_special(struct world *mzx_world, char *char_value,
 
         if(cur_robot)
         {
-          fwrite(cur_robot->program_bytecode,
+          vfwrite(cur_robot->program_bytecode,
            cur_robot->program_bytecode_length, 1, bc_file);
         }
 
-        fclose(bc_file);
+        vfclose(bc_file);
       }
       break;
     }
@@ -3434,9 +3455,9 @@ static struct counter *find_counter(struct counter_list *counter_list,
 {
   struct counter *current = NULL;
 
-#if defined(CONFIG_KHASH)
+#ifdef CONFIG_COUNTER_HASH_TABLES
   size_t name_length = strlen(name);
-  KHASH_FIND(COUNTER, counter_list->hash_table, name, name_length, current);
+  HASH_FIND(COUNTER, counter_list->hash_table, name, name_length, current);
   *next = counter_list->num_counters;
   return current;
 
@@ -3645,10 +3666,17 @@ void initialize_gateway_functions(struct world *mzx_world)
   set_gateway(counter_list, "TIME", GATEWAY_TIME);
 }
 
+static size_t get_counter_alloc_size(int name_length)
+{
+  // Attempt to reclaim any padding bytes at the end of the struct...
+  return MAX(sizeof(struct counter),
+   offsetof(struct counter, name) + name_length + 1);
+}
+
 static struct counter *allocate_new_counter(const char *name, int name_length,
  int value)
 {
-  struct counter *dest = cmalloc(sizeof(struct counter) + name_length);
+  struct counter *dest = cmalloc(get_counter_alloc_size(name_length));
 
   memcpy(dest->name, name, name_length);
   dest->name[name_length] = 0;
@@ -3660,19 +3688,25 @@ static struct counter *allocate_new_counter(const char *name, int name_length,
 }
 
 static void add_counter(struct counter_list *counter_list, const char *name,
- int value, int position)
+ int value, unsigned int position)
 {
-  int count = counter_list->num_counters;
-  int allocated = counter_list->num_counters_allocated;
+  unsigned int count = counter_list->num_counters;
+  unsigned int allocated = counter_list->num_counters_allocated;
   struct counter **base = counter_list->counters;
   struct counter *dest;
-  int name_length = strlen(name);
+  unsigned int name_length = strlen(name);
 
   // Need a reallocation?
   if(count == allocated)
   {
     if(allocated)
+    {
+      // Gracefully fail if this tries to go over 2b...
+      if(allocated >= (size_t)(INT32_MAX))
+        return;
+
       allocated *= 2;
+    }
     else
       allocated = MIN_COUNTER_ALLOCATE;
 
@@ -3695,8 +3729,8 @@ static void add_counter(struct counter_list *counter_list, const char *name,
   counter_list->counters[position] = dest;
   counter_list->num_counters = count + 1;
 
-#ifdef CONFIG_KHASH
-  KHASH_ADD(COUNTER, counter_list->hash_table, dest);
+#ifdef CONFIG_COUNTER_HASH_TABLES
+  HASH_ADD(COUNTER, counter_list->hash_table, dest);
 #endif
 }
 
@@ -3934,7 +3968,7 @@ void div_counter(struct world *mzx_world, const char *name, int value, int id)
     current_value =
      fdest->function_read(mzx_world, fdest, name, id);
     fdest->function_write(mzx_world, fdest, name,
-     current_value / value, id);
+     safe_divide_32(current_value, value), id);
   }
   else
   {
@@ -3942,7 +3976,7 @@ void div_counter(struct world *mzx_world, const char *name, int value, int id)
 
     if(cdest)
     {
-      value = cdest->value / value;
+      value = safe_divide_32(cdest->value, value);
 
       if(cdest->gateway_write && cdest->gateway_write < NUM_GATEWAYS)
       {
@@ -3975,14 +4009,14 @@ void mod_counter(struct world *mzx_world, const char *name, int value, int id)
      fdest->function_read(mzx_world, fdest, name, id);
 
     fdest->function_write(mzx_world, fdest, name,
-     current_value % value, id);
+     safe_modulo_32(current_value, value), id);
   }
   else
   {
     cdest = find_counter(counter_list, name, &next);
 
     if(cdest)
-      cdest->value %= value;
+      cdest->value = safe_modulo_32(cdest->value, value);
   }
 }
 
@@ -3994,8 +4028,8 @@ void load_new_counter(struct counter_list *counter_list, int index,
 
   counter_list->counters[index] = dest;
 
-#ifdef CONFIG_KHASH
-  KHASH_ADD(COUNTER, counter_list->hash_table, dest);
+#ifdef CONFIG_COUNTER_HASH_TABLES
+  HASH_ADD(COUNTER, counter_list->hash_table, dest);
 #endif
 }
 
@@ -4014,10 +4048,10 @@ void sort_counter_list(struct counter_list *counter_list)
 
 void clear_counter_list(struct counter_list *counter_list)
 {
-  int i;
+  size_t i;
 
-#ifdef CONFIG_KHASH
-  KHASH_CLEAR(COUNTER, counter_list->hash_table);
+#ifdef CONFIG_COUNTER_HASH_TABLES
+  HASH_CLEAR(COUNTER, counter_list->hash_table);
   counter_list->hash_table = NULL;
 #endif
 
@@ -4030,3 +4064,39 @@ void clear_counter_list(struct counter_list *counter_list)
   counter_list->num_counters_allocated = 0;
   counter_list->counters = NULL;
 }
+
+#ifdef CONFIG_EDITOR
+
+void counter_list_size(struct counter_list *counter_list,
+ size_t *list_size, size_t *table_size, size_t *counters_size)
+{
+  if(list_size)
+    *list_size = counter_list->num_counters_allocated * sizeof(struct counter *);
+
+  if(table_size)
+  {
+    *table_size = 0;
+#ifdef CONFIG_COUNTER_HASH_TABLES
+    HASH_MEMORY_USAGE(COUNTER, counter_list->hash_table, *table_size);
+#endif
+  }
+
+  if(counters_size)
+  {
+    size_t total = 0;
+    size_t i;
+
+    if(counter_list->counters)
+    {
+      for(i = 0; i < counter_list->num_counters; i++)
+      {
+        struct counter *c = counter_list->counters[i];
+        if(c)
+          total += get_counter_alloc_size(c->name_length);
+      }
+    }
+    *counters_size = total;
+  }
+}
+
+#endif /* CONFIG_EDITOR */

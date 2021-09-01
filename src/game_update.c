@@ -34,6 +34,7 @@
 #include "scrdisp.h" // strlencolor
 #include "sprite.h"
 #include "robot.h"
+#include "util.h"
 #include "world.h"
 #include "world_struct.h"
 
@@ -51,6 +52,21 @@
 // Slowed = 1 to not update lazwall or time
 // due to slowtime or freezetime
 
+void update_scroll_color(void)
+{
+  static boolean scroll_color_flip_flop;
+  scroll_color_flip_flop = !scroll_color_flip_flop;
+
+  // Change scroll color
+  if(!scroll_color_flip_flop)
+  {
+    scroll_color++;
+
+    if(scroll_color > 15)
+      scroll_color = 7;
+  }
+}
+
 static void update_variables(struct world *mzx_world)
 {
   struct board *src_board = mzx_world->current_board;
@@ -62,7 +78,6 @@ static void update_variables(struct world *mzx_world)
   int b_mesg_timer = src_board->b_mesg_timer;
   int invinco;
   int lazwall_start = src_board->lazwall_start;
-  static boolean scroll_color_flip_flop;
 
   // Determine whether the current cycle is frozen
   if(mzx_world->freeze_time_dur)
@@ -83,17 +98,8 @@ static void update_variables(struct world *mzx_world)
   if(!mzx_world->current_cycle_frozen)
     mzx_world->current_cycle_odd = !mzx_world->current_cycle_odd;
 
-  // Also toggle the scroll color flip flop
-  scroll_color_flip_flop = !scroll_color_flip_flop;
-
-  // Change scroll color
-  if(!scroll_color_flip_flop)
-  {
-    scroll_color++;
-
-    if(scroll_color > 15)
-      scroll_color = 7;
-  }
+  // Also update the scroll color.
+  update_scroll_color();
 
   // Decrease time limit (unless this is a frozen cycle)
   if(!mzx_world->current_cycle_odd && !mzx_world->current_cycle_frozen)
@@ -761,7 +767,7 @@ static void draw_message(struct world *mzx_world)
 {
   struct board *cur_board = mzx_world->current_board;
   int mesg_y = cur_board->b_mesg_row;
-  Uint8 tmp_color = scroll_color;
+  unsigned char tmp_color = scroll_color;
   char *lines[25];
   int i = 1;
   int j;
@@ -799,8 +805,7 @@ static void draw_message(struct world *mzx_world)
     if(mesg_x == -1)
       mesg_x = 40 - (mesg_length / 2);
 
-    color_string_ext_special(lines[j], mesg_x, mesg_y, &tmp_color,
-      0, 0, false);
+    color_string_ext_special(lines[j], mesg_x, mesg_y, &tmp_color, false, 0, 0);
 
     if((mesg_x > 0) && (mesg_edges))
       draw_char_ext(' ', scroll_color, mesg_x - 1, mesg_y, 0, 0);
@@ -897,7 +902,7 @@ boolean draw_world(context *ctx, boolean is_title)
     write_string(tmp_str, 1, 24, timer_color, 0);
 
     // Border with spaces
-    draw_char(' ', edge_color, (Uint32)strlen(tmp_str) + 1, 24);
+    draw_char(' ', edge_color, (unsigned int)strlen(tmp_str) + 1, 24);
     draw_char(' ', edge_color, 0, 24);
   }
 

@@ -1,9 +1,10 @@
 ##
 # MegaZeux Build System (GNU Make)
 #
-# NOTE: This build system was recently re-designed to not use recursive
-#       Makefiles. The rationale for this is documented here:
-#                  http://aegis.sourceforge.net/auug97.pdf
+# NOTE: This build system is designed to not use recursive Makefiles.
+#       The rationale for this is documented here:
+#
+# https://web.archive.org/web/20200128044903/http://aegis.sourceforge.net/auug97.pdf
 ##
 
 #
@@ -14,19 +15,33 @@ ifeq ($(filter -r,$(MAKEFLAGS)),)
 MAKEFLAGS += -r
 endif
 
-.PHONY: all clean help_check test test_clean mzx mzx.debug build build_clean source
+.PHONY: all clean help_check mzx mzx.debug build build_clean source
+.PHONY: test testworlds unit unittest test_clean unit_clean
+
+#
+# Define this first so arch-specific rules don't hijack the default target.
+#
+all:
 
 -include platform.inc
 include version.inc
 
-all: mzx
-debuglink: all mzx.debug
+#
+# ${build_root}: base location where builds are copied to be archived for release.
+# ${build}: location where the MegaZeux executable and data files should be placed.
+# Defaults to ${build_root}, but the architecture Makefile may override this to
+# use a subdirectory instead. This is useful when a platform expects a particular
+# path hierarchy within the archive (e.g. MacOS .app bundles).
+#
+build_root := build/${SUBPLATFORM}
+build := ${build_root}
 
 -include arch/${PLATFORM}/Makefile.in
 
 CC      ?= gcc
 CXX     ?= g++
 AR      ?= ar
+AS      ?= as
 STRIP   ?= strip --strip-unneeded
 OBJCOPY ?= objcopy
 PEFIX   ?= true
@@ -38,6 +53,8 @@ LN      ?= ln
 MKDIR   ?= mkdir
 MV      ?= mv
 RM      ?= rm
+
+include arch/compat.inc
 
 #
 # Set up CFLAGS/LDFLAGS for all MegaZeux external dependencies.
@@ -52,7 +69,7 @@ ifeq (${BUILD_SDL},1)
 ifneq (${BUILD_LIBSDL2},)
 
 # Check PREFIX for sdl2-config.
-ifneq ($(wildcard ${SDL_PREFIX}/bin/sdl2-config),)
+ifneq ($(and ${SDL_PREFIX},$(wildcard ${SDL_PREFIX}/bin/sdl2-config)),)
 SDL_CONFIG  := ${SDL_PREFIX}/bin/sdl2-config
 else ifneq ($(wildcard ${PREFIX}/bin/sdl2-config),)
 SDL_CONFIG  := ${PREFIX}/bin/sdl2-config
@@ -72,7 +89,7 @@ endif
 ifeq (${BUILD_LIBSDL2},)
 
 # Check PREFIX for sdl-config.
-ifneq ($(wildcard ${SDL_PREFIX}/bin/sdl-config),)
+ifneq ($(and ${SDL_PREFIX},$(wildcard ${SDL_PREFIX}/bin/sdl-config)),)
 SDL_CONFIG  := ${SDL_PREFIX}/bin/sdl-config
 else ifneq ($(wildcard ${PREFIX}/bin/sdl-config),)
 SDL_CONFIG  := ${PREFIX}/bin/sdl-config
@@ -134,7 +151,9 @@ ZLIB_LDFLAGS ?= $(LINK_STATIC_IF_MIXED) -L${PREFIX}/lib -lz
 ifeq (${LIBPNG},1)
 
 # Check PREFIX for libpng-config.
-ifneq ($(wildcard ${PREFIX}/bin/libpng-config),)
+ifneq ($(and ${LIBPNG_PREFIX},$(wildcard ${LIBPNG_PREFIX}/bin/libpng-config)),)
+LIBPNG_CONFIG  := ${LIBPNG_PREFIX}/bin/libpng-config
+else ifneq ($(wildcard ${PREFIX}/bin/libpng-config),)
 LIBPNG_CONFIG  := ${PREFIX}/bin/libpng-config
 else
 LIBPNG_CONFIG  := libpng-config
@@ -153,8 +172,8 @@ endif
 #
 
 ifneq (${X11DIR},)
-X11_CFLAGS  ?= -I${X11DIR}/../include
-X11_LDFLAGS ?= -L${X11DIR}/../lib -lX11
+X11_CFLAGS  ?= -I${X11DIR}/include
+X11_LDFLAGS ?= -L${X11DIR}/lib -Wl,-rpath,${X11DIR}/lib -lX11
 # Make these immediate
 X11_CFLAGS := $(X11_CFLAGS)
 X11_LDFLAGS := $(X11_LDFLAGS)
@@ -180,6 +199,11 @@ ifeq (${DEBUG},1)
 #
 ifeq (${SANITIZER},address)
 DEBUG_CFLAGS := -fsanitize=address -O1 -fno-omit-frame-pointer
+else ifeq (${SANITIZER},undefined)
+# Signed integer overflows (shift-base, signed-integer-overflow)
+# are pretty much inevitable in Robotic, so ignore them.
+DEBUG_CFLAGS := -fsanitize=undefined -O0 -fno-omit-frame-pointer \
+ -fno-sanitize-recover=all -fno-sanitize=shift-base,signed-integer-overflow
 else ifeq (${SANITIZER},thread)
 DEBUG_CFLAGS := -fsanitize=thread -O2 -fno-omit-frame-pointer -fPIE
 ARCH_EXE_LDFLAGS += -pie
@@ -206,51 +230,69 @@ CXXFLAGS += ${OPTIMIZE_CFLAGS} -DNDEBUG
 endif
 
 #
-# Android headers are busted and we get too many warnings..
+# Enable C++11 for compilers that support it.
+# Anything actually using C++11 should be optional or platform-specific,
+# as features using C++11 reduce portability.
 #
-ifneq (${PLATFORM},android)
-CFLAGS   += -Wundef -Wunused-macros
-CXXFLAGS += -Wundef -Wunused-macros
+ifeq (${HAS_CXX_11},1)
+CXX_STD = -std=gnu++11
+else
+CXX_STD = -std=gnu++98
 endif
 
 #
 # Always generate debug information; this may end up being
 # stripped (on embedded platforms) or objcopy'ed out.
 #
-CFLAGS   += -g -W -Wall -Wno-unused-parameter -std=gnu99
-CFLAGS   += -Wdeclaration-after-statement ${ARCH_CFLAGS}
-CXXFLAGS += -g -W -Wall -Wno-unused-parameter -std=gnu++98
-CXXFLAGS += -fno-exceptions -fno-rtti ${ARCH_CXXFLAGS}
+CFLAGS   += -std=gnu99 -g ${ARCH_CFLAGS}
+CXXFLAGS += ${CXX_STD} -g -fno-exceptions -fno-rtti ${ARCH_CXXFLAGS}
 LDFLAGS  += ${ARCH_LDFLAGS}
 
 #
-# GCC version >= 7.x
+# Default warnings.
+# Note: -Wstrict-prototypes was previously turned off for Android/NDS/Wii/PSP.
+#
+warnings := -Wall -Wextra -Wno-unused-parameter -Wwrite-strings
+warnings += -Wundef -Wunused-macros -Wpointer-arith
+CFLAGS   += ${warnings} -Wdeclaration-after-statement -Wmissing-prototypes -Wstrict-prototypes
+CXXFLAGS += ${warnings}
+
+#
+# Optional compile flags.
 #
 
-GCC_VER := ${shell ${CC} -dumpversion}
-GCC_VER_MAJOR := ${shell ${CC} -dumpversion | cut -d. -f1}
-GCC_VER_MAJOR_GE_7 := ${shell test $(GCC_VER_MAJOR) -ge 7; echo $$?}
+#
+# Warn against global functions defined without a previous declaration (C++).
+#
+ifeq (${HAS_W_MISSING_DECLARATIONS_CXX},1)
+CXXFLAGS += -Wmissing-declarations
+endif
 
-ifeq ($(GCC_VER_MAJOR_GE_7),0)
-# This gives spurious warnings on Linux. The snprintf implementation on Linux
-# will terminate even in the case of truncation, making this largely useless.
-# It does not trigger using mingw, where it would actually matter.
+#
+# Warn against variable-length array (VLA) usage, which is technically valid
+# C99 but is in bad taste and isn't supported by MSVC.
+#
+ifeq (${HAS_W_VLA},1)
+CFLAGS   += -Wvla
+CXXFLAGS += -Wvla
+endif
+
+#
+# Linux GCC gives spurious format truncation warnings. The snprintf
+# implementation on Linux will terminate even in the case of truncation,
+# making this largely useless. It does not trigger using mingw (where it
+# would actually matter).
+#
+ifeq (${HAS_W_NO_FORMAT_TRUNCATION},1)
 CFLAGS   += -Wno-format-truncation
+CXXFLAGS += -Wno-format-truncation
 endif
 
 #
-# GCC version >= 4.x
+# Old GCC versions emit false positive warnings for C++11 value initializers.
 #
-
-GCC_VER_MAJOR_GE_4 := ${shell test $(GCC_VER_MAJOR) -ge 4; echo $$?}
-
-ifeq ($(GCC_VER_MAJOR_GE_4),0)
-
-ifeq (${DEBUG},1)
-ifneq (${GCC_VER},4.2.1)
-CFLAGS   += -fbounds-check
-CXXFLAGS += -fbounds-check
-endif
+ifeq (${HAS_BROKEN_W_MISSING_FIELD_INITIALIZERS},1)
+CXXFLAGS += -Wno-missing-field-initializers
 endif
 
 #
@@ -260,31 +302,54 @@ endif
 # Variadic macros are arguably less portable, but all the compilers we
 # support have them.
 #
-ifneq (${PLATFORM},android)
-CFLAGS   += -pedantic -Wno-variadic-macros
-CXXFLAGS += -pedantic -fpermissive -Wno-variadic-macros
+ifeq (${HAS_PEDANTIC},1)
+CFLAGS   += -pedantic
+CXXFLAGS += -pedantic
+
+ifeq (${HAS_W_NO_VARIADIC_MACROS},1)
+CFLAGS   += -Wno-variadic-macros
+CXXFLAGS += -Wno-variadic-macros
+endif
 endif
 
+#
+# The following flags are not applicable to mingw builds.
+#
 ifneq (${PLATFORM},mingw)
 
 #
 # Symbols in COFF binaries are implicitly hidden unless exported; this
 # flag just confuses GCC and must be disabled.
 #
+ifeq (${HAS_F_VISIBILITY},1)
 CFLAGS   += -fvisibility=hidden
 CXXFLAGS += -fvisibility=hidden
-
-#
-# Skip the stack protector on embedded platforms; it just unnecessarily
-# slows things down, and there's no easy way to write a convincing
-# __stack_chk_fail function. MinGW may or may not have a __stack_chk_fail
-# function. Skip android, too.
-#
-ifeq ($(or ${BUILD_GP2X},${BUILD_NDS},${BUILD_3DS},${BUILD_PSP},${BUILD_WII}),)
-CFLAGS   += -fstack-protector-all
-CXXFLAGS += -fstack-protector-all
 endif
 
+endif # PLATFORM=mingw
+
+#
+# The stack protector is optional and is generally only built for Linux/BSD and
+# Mac OS X. Windows and most embedded platforms currently disable this.
+#
+ifeq (${BUILD_STACK_PROTECTOR},1)
+ifeq (${HAS_F_STACK_PROTECTOR},1)
+CFLAGS   += -fstack-protector-all
+CXXFLAGS += -fstack-protector-all
+else
+$(warning stack protector not supported, ignoring.)
+endif
+endif
+
+#
+# Enable -fanalyzer if supported.
+#
+ifeq (${BUILD_F_ANALYZER},1)
+ifeq (${HAS_F_ANALYZER},1)
+CFLAGS   += -fanalyzer
+CXXFLAGS += -fanalyzer
+else
+$(warning GCC 10+ is required for -fanalyzer, ignoring.)
 endif
 endif
 
@@ -305,6 +370,7 @@ override V:=
 CC      := @${CC}
 CXX     := @${CXX}
 AR      := @${AR}
+AS      := @${AS}
 STRIP   := @${STRIP}
 OBJCOPY := @${OBJCOPY}
 PEFIX   := @${PEFIX}
@@ -326,28 +392,31 @@ source: build/${TARGET}src
 
 #
 # Build source target
-# Targetting unix primarily, so turn off autocrlf if necessary
+# Targeting unix primarily, so turn off autocrlf if necessary.
 #
-ifneq ($(shell which git),)
-USER_AUTOCRLF=$(shell git config core.autocrlf)
-endif
 build/${TARGET}src:
 	${RM} -r build/${TARGET}
 	${MKDIR} -p build/dist/source
-	@git config core.autocrlf false
-	@git checkout-index -a --prefix build/${TARGET}/
-	@git config core.autocrlf ${USER_AUTOCRLF}
+	@git -c "core.autocrlf=false" checkout-index -a --prefix build/${TARGET}/
 	${RM} -r build/${TARGET}/scripts
 	${RM} build/${TARGET}/.gitignore build/${TARGET}/.gitattributes
-	@cd build/${TARGET} && make distclean
+	@cd build/${TARGET} && ${MAKE} distclean
 	@tar -C build -Jcf build/dist/source/${TARGET}src.tar.xz ${TARGET}
 
 #
-# The SUPPRESS_BUILD hack is required to allow the placebo "dist"
+# The SUPPRESS_ALL_TARGETS hack is required to allow the placebo "dist"
 # Makefile to provide an 'all:' target, which allows it to print
-# a message. We don't want to pull in other targets, confusing Make.
+# a message. Pulling in any other targets would confuse Make.
 #
-ifneq (${SUPPRESS_BUILD},1)
+# Additionally, there are several other SUPPRESS flags that can be set to
+# conditionally disable rules. This is useful for cross-compiling builds that
+# have no use for host-based rules or for platforms that use meta targets.
+#
+# * SUPPRESS_CC_TARGETS prevents "mzx", etc from being added to "all".
+# * SUPPRESS_BUILD_TARGETS suppresses "build".
+# * SUPPRESS_HOST_TARGETS suppresses "assets/help.fil", "test", etc.
+#
+ifneq (${SUPPRESS_ALL_TARGETS},1)
 
 mzxrun = mzxrun${BINEXT}
 mzx = megazeux${BINEXT}
@@ -377,30 +446,46 @@ endif
 
 include src/Makefile.in
 
-clean: mzx_clean test_clean
+clean: mzx_clean test_clean unit_clean
+
+ifneq (${SUPPRESS_CC_TARGETS},1)
+all: mzx
+debuglink: all mzx.debug
+endif
 
 ifeq (${BUILD_UTILS},1)
 include src/utils/Makefile.in
-debuglink: utils utils.debug
 clean: utils_clean
+ifneq (${SUPPRESS_CC_TARGETS},1)
+debuglink: utils utils.debug
 all: utils
 endif
+endif
+
+ifneq (${SUPPRESS_BUILD_TARGETS},1)
 
 ifeq (${build},)
-build := build/${SUBPLATFORM}
+build := ${build_root}
 endif
+
+.PHONY: ${build}
 
 build: ${build} ${build}/assets ${build}/docs
 
 ${build}:
+	${RM} -r ${build_root}
 	${MKDIR} -p ${build}
 	${CP} config.txt LICENSE ${build}
-	${CP} ${mzxrun} ${build}
+	@if test -f ${mzxrun}; then \
+		cp ${mzxrun} ${build}; \
+	fi
 	@if test -f ${mzxrun}.debug; then \
 		cp ${mzxrun}.debug ${build}; \
 	fi
 ifeq (${BUILD_EDITOR},1)
-	${CP} ${mzx} ${build}
+	@if test -f ${mzx}; then \
+		cp ${mzx} ${build}; \
+	fi
 	@if test -f ${mzx}.debug; then \
 		cp ${mzx}.debug ${build}; \
 	fi
@@ -418,21 +503,20 @@ ifeq (${BUILD_UTILS},1)
 	${MKDIR} ${build}/utils
 	${CP} ${checkres} ${downver} ${build}/utils
 	${CP} ${hlp2txt} ${txt2hlp} ${build}/utils
-ifeq (${LIBPNG},1)
-	${CP} ${png2smzx} ${build}/utils
-endif
-	${CP} ${ccv} ${build}/utils
-	@if test -f ${checkres}.debug; then \
-		cp ${checkres}.debug ${downver}.debug ${build}/utils; \
-		cp ${hlp2txt}.debug  ${txt2hlp}.debug ${build}/utils; \
-		cp ${png2smzx}.debug ${build}/utils; \
-	fi
+	${CP} ${ccv} ${png2smzx} ${build}/utils
+	@if [ -f "${checkres}.debug" ]; then cp ${checkres}.debug ${build}/utils; fi
+	@if [ -f "${downver}.debug" ]; then cp ${downver}.debug ${build}/utils; fi
+	@if [ -f "${hlp2txt}.debug" ]; then cp ${hlp2txt}.debug ${build}/utils; fi
+	@if [ -f "${txt2hlp}.debug" ]; then cp ${txt2hlp}.debug ${build}/utils; fi
+	@if [ -f "${ccv}.debug" ]; then cp ${ccv}.debug ${build}/utils; fi
+	@if [ -f "${png2smzx}.debug" ]; then cp ${png2smzx}.debug ${build}/utils; fi
 endif
 
 ${build}/docs: ${build}
 	${MKDIR} -p ${build}/docs
 	${CP} docs/macro.txt docs/keycodes.html docs/mzxhelp.html ${build}/docs
-	${CP} docs/joystick.html ${build}/docs
+	${CP} docs/joystick.html docs/cycles_and_commands.txt ${build}/docs
+	${CP} docs/fileform.html ${build}/docs
 	${CP} docs/changelog.txt docs/platform_matrix.html ${build}/docs
 
 ${build}/assets: ${build}
@@ -441,7 +525,7 @@ ${build}/assets: ${build}
 	${CP} assets/smzx.pal ${build}/assets
 ifeq (${BUILD_EDITOR},1)
 	${CP} assets/ascii.chr assets/blank.chr ${build}/assets
-	${CP} assets/smzx.chr ${build}/assets
+	${CP} assets/smzx.chr assets/smzx2.chr ${build}/assets
 endif
 ifeq (${BUILD_HELPSYS},1)
 	${CP} assets/help.fil ${build}/assets
@@ -459,10 +543,14 @@ ifeq (${BUILD_GAMECONTROLLERDB},1)
 	 ${build}/assets
 endif
 
+endif # !SUPPRESS_BUILD_TARGETS
+
 distclean: clean
 	@echo "  DISTCLEAN"
 	@rm -f src/config.h
 	@echo "PLATFORM=none" > platform.inc
+
+ifneq (${SUPPRESS_HOST_TARGETS},1)
 
 assets/help.fil: ${txt2hlp} docs/WIPHelp.txt
 	$(if ${V},,@echo "  txt2hlp " $@)
@@ -478,10 +566,20 @@ help_check: ${hlp2txt} assets/help.fil
 	@diff --strip-trailing-cr -q docs/WIPHelp.txt help.txt
 	@rm -f help.txt
 
-test:
-	@bash testworlds/run.sh @{PLATFORM} @{LIBDIR}
+-include unit/Makefile.in
+
+test: unit
+
+test testworlds:
+ifeq (${BUILD_MODULAR},1)
+	@${SHELL} testworlds/run.sh ${PLATFORM} "$(realpath ${core_target})"
+else
+	@${SHELL} testworlds/run.sh ${PLATFORM}
+endif
+
+endif # !SUPPRESS_HOST_TARGETS
 
 test_clean:
 	@rm -rf testworlds/log
 
-endif
+endif # !SUPPRESS_ALL_TARGETS

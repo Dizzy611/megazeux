@@ -26,18 +26,69 @@ __M_BEGIN_DECLS
 
 #define OPTION_NAME_LEN 33
 
+enum config_type
+{
+  SYSTEM_CNF,
+  GAME_CNF,
+  GAME_EDITOR_CNF,
+  NUM_CONFIG_TYPES
+};
+
+enum force_bpp_special
+{
+  BPP_AUTO = 0
+};
+
 enum ratio_type
 {
   RATIO_CLASSIC_4_3,
   RATIO_MODERN_64_35,
-  RATIO_STRETCH
+  RATIO_STRETCH,
+  NUM_RATIO_TYPES
+};
+
+enum resample_mode
+{
+  RESAMPLE_MODE_NONE,
+  RESAMPLE_MODE_LINEAR,
+  RESAMPLE_MODE_CUBIC,
+  RESAMPLE_MODE_FIR,
+  NUM_RESAMPLE_MODES
+};
+
+enum gl_filter_type
+{
+  CONFIG_GL_FILTER_NEAREST,
+  CONFIG_GL_FILTER_LINEAR,
+  NUM_GL_FILTER_TYPES
+};
+
+enum cursor_mode_types
+{
+  CURSOR_MODE_UNDERLINE,  // Underline for text entry (insert).
+  CURSOR_MODE_SOLID,      // Solid for text entry (overwrite) and editing.
+  CURSOR_MODE_HINT,       // Hidden cursor for active UI element hints.
+  CURSOR_MODE_INVISIBLE,  // Cursor disabled.
+  NUM_CURSOR_MODE_TYPES
 };
 
 enum allow_cheats_type
 {
   ALLOW_CHEATS_NEVER,
   ALLOW_CHEATS_MZXRUN,
-  ALLOW_CHEATS_ALWAYS
+  ALLOW_CHEATS_ALWAYS,
+  NUM_ALLOW_CHEATS_TYPES
+};
+
+enum host_family
+{
+  /** Prefer IPv4 address resolution for hostnames */
+  HOST_FAMILY_IPV4,
+  /** Prefer IPv6 address resolution for hostnames */
+  HOST_FAMILY_IPV6,
+  /** Allow either IPv4 or IPv6 addresses. */
+  HOST_FAMILY_ANY,
+  NUM_HOST_FAMILIES
 };
 
 enum update_auto_check_mode
@@ -60,17 +111,19 @@ struct config_info
   char video_output[16];
   int force_bpp;
   enum ratio_type video_ratio;
-  char gl_filter_method[16];
-  char gl_scaling_shader[32];
+  enum gl_filter_type gl_filter_method;
   int gl_vsync;
+  char gl_scaling_shader[32];
+  char sdl_render_driver[16];
+  enum cursor_mode_types cursor_hint_mode;
   boolean allow_screenshots;
 
   // Audio options
   int output_frequency;
   int audio_buffer_samples;
-  int oversampling_on;
-  int resample_mode;
-  int modplug_resample_mode;
+  boolean oversampling_on;
+  enum resample_mode resample_mode;
+  enum resample_mode module_resample_mode;
   int max_simultaneous_samples;
   int music_volume;
   int sam_volume;
@@ -78,17 +131,26 @@ struct config_info
   boolean music_on;
   boolean pc_speaker_on;
 
+  // Event options
+  boolean allow_gamecontroller;
+  boolean pause_on_unfocus;
+  int num_buffered_events;
+
   // Game options
   char startup_path[256];
   char startup_file[256];
   char default_save_name[256];
   int mzx_speed;
   enum allow_cheats_type allow_cheats;
+  boolean auto_decrypt_worlds;
   boolean startup_editor;
   boolean standalone_mode;
   boolean no_titlescreen;
   boolean system_mouse;
   boolean grab_mouse;
+  boolean save_slots;
+  char save_slots_name[256];
+  char save_slots_ext[256];
 
   // Editor options
   boolean test_mode;
@@ -99,34 +161,54 @@ struct config_info
   // Network layer options
 #ifdef CONFIG_NETWORK
   boolean network_enabled;
+  enum host_family network_address_family;
   char socks_host[256];
+  char socks_username[256];
+  char socks_password[256];
   int socks_port;
 #endif
 
 #ifdef CONFIG_UPDATER
+  boolean updater_enabled;
   int update_host_count;
-  char **update_hosts;
+  const char **update_hosts;
   char update_branch_pin[256];
   int update_auto_check;
 #endif
 };
 
+/**
+ * Used to create arrays containing all allowed values for certain options.
+ */
+struct config_enum
+{
+  const char * const key;
+  const int value;
+};
+
 CORE_LIBSPEC struct config_info *get_config(void);
 CORE_LIBSPEC void default_config(void);
-CORE_LIBSPEC void set_config_from_file(const char *conf_file_name);
-CORE_LIBSPEC void set_config_from_file_startup(const char *conf_file_name);
+CORE_LIBSPEC void set_config_from_file(enum config_type type,
+ const char *conf_file_name);
 CORE_LIBSPEC void set_config_from_command_line(int *argc, char *argv[]);
 CORE_LIBSPEC void free_config(void);
 
-typedef int (*find_change_option)(void *conf, char *name, char *value,
+typedef boolean (*find_change_option)(void *conf, char *name, char *value,
  char *extended_data);
 
 #ifdef CONFIG_EDITOR
 
-CORE_LIBSPEC void __set_config_from_file(find_change_option find_change_handler,
- void *conf, const char *conf_file_name);
-CORE_LIBSPEC void __set_config_from_command_line(
- find_change_option find_change_handler, void *conf, int *argc, char *argv[]);
+CORE_LIBSPEC void register_config(enum config_type type, void *conf,
+ find_change_option handler);
+
+CORE_LIBSPEC boolean config_int(int *dest, char *value, int min, int max);
+CORE_LIBSPEC boolean _config_enum(int *dest, const char *value,
+ const struct config_enum *allowed, size_t num);
+CORE_LIBSPEC boolean config_boolean(boolean *dest, const char *value);
+CORE_LIBSPEC boolean _config_string(char *dest, size_t dest_len, const char *value);
+
+#define config_enum(d, v, a) _config_enum(d, v, a, ARRAY_SIZE(a))
+#define config_string(d, v) _config_string(d, ARRAY_SIZE(d), v)
 
 #endif // CONFIG_EDITOR
 

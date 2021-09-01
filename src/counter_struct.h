@@ -25,26 +25,35 @@
 
 __M_BEGIN_DECLS
 
+#include <inttypes.h>
+
 struct counter
 {
-  unsigned char gateway_write;
-  int value;
-  int name_length;
+  int32_t value;
+#ifdef CONFIG_COUNTER_HASH_TABLES
+  uint32_t hash;
+#endif
+  uint16_t name_length;
+  uint8_t gateway_write;
+  uint8_t unused;
+
+  /**
+   * This struct will be allocated with extra space to contain the entire
+   * counter name, null-terminated. This field MUST be at least 4-aligned and
+   * it must be the last field (any extra padding after it will be used).
+   */
   char name[1];
 };
 
 struct counter_list
 {
-  int num_counters;
-  int num_counters_allocated;
+  unsigned int num_counters;
+  unsigned int num_counters_allocated;
   struct counter **counters;
-#ifdef CONFIG_KHASH
+#ifdef CONFIG_COUNTER_HASH_TABLES
   void *hash_table;
 #endif
 };
-
-// TODO - Give strings a dynamic length. It would expand
-// set ends up being larger than the current size.
 
 // Name and storage share space. It's messy, but fast and
 // space efficient.
@@ -77,26 +86,36 @@ struct counter_list
 
 struct string
 {
-  // Back reference to the string's position in the list, mandatory
-  // because we're not using a search to find it with the hash table. We'll
-  // add it for both though so there doesn't have to be a hash table ifdef
-  // in world.c
-  int list_ind;
-
-  int name_length;
-  size_t length;
-  size_t allocated_length;
   char *value;
+  uint32_t length;
+  uint32_t allocated_length;
 
+  // Back reference to the string's position in the main list, mandatory as
+  // a hash table search needs to be able to determine this value.
+  uint32_t list_ind;
+
+#ifdef CONFIG_COUNTER_HASH_TABLES
+  uint32_t hash;
+#endif
+
+  uint16_t name_length;
+  uint8_t unused;
+  uint8_t unused2;
+
+  /**
+   * This struct will be allocated with extra space to contain the string name
+   * and string value. This field MUST be at least 4-aligned and must be the
+   * last field in the struct (any extra padding after it will be used).
+   */
   char name[1];
 };
 
 struct string_list
 {
-  int num_strings;
-  int num_strings_allocated;
+  unsigned int num_strings;
+  unsigned int num_strings_allocated;
   struct string **strings;
-#ifdef CONFIG_KHASH
+#ifdef CONFIG_COUNTER_HASH_TABLES
   void *hash_table;
 #endif
 };

@@ -30,14 +30,16 @@
 
 #include "audio.h"
 #include "audio_pcs.h"
+#include "audio_struct.h"
 #include "ext.h"
 #include "sampled_stream.h"
+#include "sfx.h"
 
 #include "../configure.h"
 #include "../data.h"
-#include "../fsafeopen.h"
 #include "../platform.h"
 #include "../util.h"
+#include "../io/fsafeopen.h"
 
 #if defined(CONFIG_MODPLUG) + defined(CONFIG_MIKMOD) + \
  defined(CONFIG_XMP) + defined(CONFIG_OPENMPT) > 1
@@ -53,7 +55,6 @@
 
 #ifdef CONFIG_MODPLUG
 #include "audio_modplug.h"
-#include "gdm2s3m.h"
 #endif
 
 #ifdef CONFIG_MIKMOD
@@ -75,67 +76,21 @@
 // May be used by audio plugins
 struct audio audio;
 
-#define __lock()      platform_mutex_lock(&audio.audio_mutex)
-#define __unlock()    platform_mutex_unlock(&audio.audio_mutex)
+#ifndef DEBUG
 
-#ifdef DEBUG
+#define LOCK()   platform_mutex_lock(&audio.audio_mutex)
+#define UNLOCK() platform_mutex_unlock(&audio.audio_mutex)
 
-#define LOCK()   lock(__FILE__, __LINE__)
-#define UNLOCK() unlock(__FILE__, __LINE__)
+#else /* DEBUG */
 
-static volatile int locked = 0;
-static volatile char last_lock[32];
+#include "../thread_debug.h"
 
-#ifdef CONFIG_SDL
-#include "../compat_sdl.h"
-#include <SDL_thread.h>
-static volatile SDL_threadID last_thread = 0;
-#endif
+static platform_mutex_debug mutex_debug;
 
-static void lock(const char *file, int line)
-{
-#ifdef CONFIG_SDL
-  // lock may be held here, but it shouldn't be held by the current thread.
-  // If this is SDL, we can determine if the current thread is holding it.
-  // Otherwise, print nothing because this debug message is annoying and is
-  // almost always spurious.
-  SDL_threadID cur_thread = SDL_ThreadID();
-
-  if(locked && (last_thread == cur_thread))
-  {
-    debug("%s:%d (thread %ld): locked at %s (thread %ld) already!\n",
-     file, line, cur_thread, last_lock, last_thread);
-  }
-#endif
-
-  // acquire the mutex
-  __lock();
-
-  // store information on this lock
-  snprintf((char *)last_lock, 32, "%s:%d", file, line);
-  last_lock[31] = '\0';
-#ifdef CONFIG_SDL
-  last_thread = SDL_ThreadID();
-#endif
-
-  locked = 1;
-}
-
-static void unlock(const char *file, int line)
-{
-  // lock should be held here
-  if(!locked)
-    debug("%s:%d: tried to unlock when not locked!\n", file, line);
-
-  // all ok, unlock this mutex
-  locked = 0;
-  __unlock();
-}
-
-#else // !DEBUG
-
-#define LOCK()     __lock()
-#define UNLOCK()   __unlock()
+#define LOCK()   platform_mutex_lock_debug(&audio.audio_mutex, \
+                  &audio.audio_debug_mutex, &mutex_debug, __FILE__, __LINE__)
+#define UNLOCK() platform_mutex_unlock_debug(&audio.audio_mutex, \
+                  &audio.audio_debug_mutex, &mutex_debug, __FILE__, __LINE__)
 
 #endif // DEBUG
 
@@ -147,7 +102,7 @@ int audio_get_real_frequency(int period)
   return freq_conversion / period;
 }
 
-static int volume_function(int input, int volume_setting)
+static unsigned int volume_function(int input, int volume_setting)
 {
   /* Adjust volume (0-255) exponentially according to a given setting (0-10).
    * 0 is no volume whatsoever and 10 is maximum volume. */
@@ -158,6 +113,10 @@ static int volume_function(int input, int volume_setting)
 
   return CLAMP(output, 0, 255);
 }
+
+// Disable most of the standard audio implementation on NDS, where
+// hardware mixing is utilized.
+#ifndef CONFIG_NDS
 
 void destruct_audio_stream(struct audio_stream *a_src)
 {
@@ -177,7 +136,7 @@ void destruct_audio_stream(struct audio_stream *a_src)
 }
 
 void initialize_audio_stream(struct audio_stream *a_src,
- struct audio_stream_spec *a_spec, Uint32 volume, Uint32 repeat)
+ struct audio_stream_spec *a_spec, unsigned int volume, boolean repeat)
 {
   // TODO should probably just memcpy into a spec in the audio_stream instead.
   a_src->mix_data = a_spec->mix_data;
@@ -221,10 +180,10 @@ void initialize_audio_stream(struct audio_stream *a_src,
   UNLOCK();
 }
 
-static void clip_buffer(Sint16 *dest, Sint32 *src, int len)
+static void clip_buffer(int16_t *dest, int32_t *src, size_t len)
 {
-  Sint32 cur_sample;
-  int i;
+  int32_t cur_sample;
+  size_t i;
 
   for(i = 0; i < len; i++)
   {
@@ -239,9 +198,14 @@ static void clip_buffer(Sint16 *dest, Sint32 *src, int len)
   }
 }
 
-void audio_callback(Sint16 *stream, int len)
+/**
+ * Audio callback for threaded software mixing. The output buffer must be
+ * 16-bit stereo and the length value must be the size of the buffer in bytes
+ * (i.e. the frame count times 4).
+ */
+void audio_callback(int16_t *stream, size_t len)
 {
-  Uint32 destroy_flag;
+  boolean destroy_flag;
   struct audio_stream *current_astream;
 
   LOCK();
@@ -250,14 +214,15 @@ void audio_callback(Sint16 *stream, int len)
 
   if(current_astream)
   {
-    memset(audio.mix_buffer, 0, len * 2);
+    size_t frames = len / (2 * sizeof(int16_t));
+    memset(audio.mix_buffer, 0, frames * 2 * sizeof(int32_t));
 
     while(current_astream != NULL)
     {
       struct audio_stream *next_astream = current_astream->next;
 
       destroy_flag = current_astream->mix_data(current_astream,
-       audio.mix_buffer, len);
+       audio.mix_buffer, frames, 2);
 
       if(destroy_flag)
       {
@@ -272,7 +237,7 @@ void audio_callback(Sint16 *stream, int len)
       current_astream = next_astream;
     }
 
-    clip_buffer(stream, audio.mix_buffer, len / 2);
+    clip_buffer(stream, audio.mix_buffer, frames * 2);
   }
 
   UNLOCK();
@@ -281,6 +246,10 @@ void audio_callback(Sint16 *stream, int len)
 void init_audio(struct config_info *conf)
 {
   platform_mutex_init(&audio.audio_mutex);
+  platform_mutex_init(&audio.audio_sfx_mutex);
+#ifdef DEBUG
+  platform_mutex_init(&audio.audio_debug_mutex);
+#endif
 
   audio.output_frequency = conf->output_frequency;
   audio.master_resample_mode = conf->resample_mode;
@@ -337,6 +306,12 @@ void quit_audio(void)
   free(audio.pcs_stream);
 
   UNLOCK();
+
+#ifdef DEBUG
+  platform_mutex_destroy(&audio.audio_debug_mutex);
+#endif
+  platform_mutex_destroy(&audio.audio_sfx_mutex);
+  platform_mutex_destroy(&audio.audio_mutex);
 }
 
 /* If the mod was successfully changed, return 1.  This value is used
@@ -356,8 +331,8 @@ int audio_play_module(char *filename, boolean safely, int volume)
 
   if(safely)
   {
-    if(fsafetranslate(filename, translated_filename) != FSAFE_SUCCESS &&
-     audio_legacy_translate(filename, translated_filename) != FSAFE_SUCCESS)
+    if(fsafetranslate(filename, translated_filename, MAX_PATH) != FSAFE_SUCCESS &&
+     audio_legacy_translate(filename, translated_filename, MAX_PATH) != FSAFE_SUCCESS)
     {
       debug("Module filename '%s' failed safety checks\n", filename);
       return 0;
@@ -480,13 +455,13 @@ static void limit_samples(int max)
 
 void audio_play_sample(char *filename, boolean safely, int period)
 {
-  Uint32 vol = volume_function(255, audio.sound_volume);
+  unsigned int vol = volume_function(255, audio.sound_volume);
   char translated_filename[MAX_PATH];
 
   if(safely)
   {
-    if(fsafetranslate(filename, translated_filename) != FSAFE_SUCCESS &&
-     audio_legacy_translate(filename, translated_filename) != FSAFE_SUCCESS)
+    if(fsafetranslate(filename, translated_filename, MAX_PATH) != FSAFE_SUCCESS &&
+     audio_legacy_translate(filename, translated_filename, MAX_PATH) != FSAFE_SUCCESS)
     {
       debug("Sample filename '%s' failed safety checks\n", filename);
       return;
@@ -502,6 +477,16 @@ void audio_play_sample(char *filename, boolean safely, int period)
   }
   else
   {
+    /**
+     * NOTE: the period is doubled here to compensate for a SAM to WAV
+     * conversion bug introduced in MZX 2.80. Unfortunately this has
+     * permanently affected the way the frequency field has been used for WAV
+     * and OGG samples and needs to be carried forward.
+     *
+     * Note that WAVs generated from the buggy SAM to WAV conversion routine
+     * are treated as stereo and must also have this buggy doubling. In other
+     * words, just double the frequency in the SAM loader.
+     */
     audio_ext_construct_stream(filename,
      audio_get_real_frequency(period * 2), vol, 0);
   }
@@ -514,7 +499,7 @@ void audio_spot_sample(int period, int which)
   // Play a sample from the current playing mod.
   // Currently only works with libxmp (and maybe only ever will).
 
-  Uint32 vol = volume_function(255, audio.sound_volume);
+  unsigned int vol = volume_function(255, audio.sound_volume);
   struct wav_info wav;
   boolean ret = false;
 
@@ -529,6 +514,11 @@ void audio_spot_sample(int period, int which)
 
   if(ret)
   {
+    /**
+     * NOTE: see above for why the period is being multiplied by 2 here.
+     * The player implementation of get_sample should enable the sam frequency
+     * hack to compensate for this.
+     */
     struct audio_stream *a_src = construct_wav_stream_direct(&wav,
      audio_get_real_frequency(period * 2), vol, !!(wav.loop_end));
     a_src->is_spot_sample = true;
@@ -735,6 +725,8 @@ int audio_get_module_loop_end(void)
   return loop_end;
 }
 
+#endif
+
 void audio_set_music_on(int val)
 {
   LOCK();
@@ -812,15 +804,14 @@ void audio_set_sound_volume(int volume)
 void audio_set_pcs_volume(int volume)
 {
   int real_volume;
-  if(!audio.pcs_stream)
-    return;
 
   LOCK();
 
   audio.pcs_volume = volume;
   real_volume = volume_function(255, audio.pcs_volume);
 
-  audio.pcs_stream->set_volume(audio.pcs_stream, real_volume);
+  if(audio.pcs_stream)
+    audio.pcs_stream->set_volume(audio.pcs_stream, real_volume);
 
   UNLOCK();
 }
@@ -839,18 +830,18 @@ void audio_set_pcs_volume(int volume)
  * This function provides a compatibility layer for this old behavior; use
  * after the initial fsafetranslate fails.
  */
-int audio_legacy_translate(const char *path, char newpath[MAX_PATH])
+int audio_legacy_translate(const char *path, char *newpath, size_t buffer_len)
 {
   char temp[MAX_PATH];
   ssize_t ext_pos = strlen(path) - 4;
 
-  if(ext_pos >= 0)
+  if(ext_pos >= 0 && (size_t)(ext_pos + 4) < buffer_len)
   {
     if(!strcasecmp(path + ext_pos, ".SAM"))
     {
       strcpy(temp, path);
       strcpy(temp + ext_pos, ".WAV");
-      return fsafetranslate(temp, newpath);
+      return fsafetranslate(temp, newpath, buffer_len);
     }
     else
 
@@ -858,7 +849,7 @@ int audio_legacy_translate(const char *path, char newpath[MAX_PATH])
     {
       strcpy(temp, path);
       strcpy(temp + ext_pos, ".S3M");
-      return fsafetranslate(temp, newpath);
+      return fsafetranslate(temp, newpath, buffer_len);
     }
   }
   return -FSAFE_MATCH_FAILED;
