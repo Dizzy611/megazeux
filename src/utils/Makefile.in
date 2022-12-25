@@ -17,12 +17,12 @@ utils_obj = src/utils/.build
 utils_cflags := ${LIBPNG_CFLAGS} -DUTILS_LIBSPEC=
 
 zip_objs  := ${io_obj}/vio.o ${io_obj}/zip.o ${io_obj}/zip_stream.o
-img_objs  := ${io_obj}/vio.o ${utils_obj}/image_file.o
+img_objs  := ${io_obj}/vio.o ${utils_obj}/image_file.o ${utils_obj}/image_gif.o
 img_flags :=
 
 ifneq (${LIBPNG},)
 img_objs  += ${core_obj}/pngops.o
-img_flags += ${LIBPNG_LDFLAGS} ${ZLIB_LDFLAGS}
+img_flags += ${LIBPNG_LDFLAGS} ${ZLIB_LDFLAGS} -lm
 endif
 
 checkres := ${utils_src}/checkres${BINEXT}

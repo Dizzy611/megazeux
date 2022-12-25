@@ -740,7 +740,7 @@ void save_robot(struct world *mzx_world, struct robot *cur_robot,
     {
       buffer = cmalloc(actual_size);
 
-      mfopen(buffer, actual_size, &mf);
+      mfopen_wr(buffer, actual_size, &mf);
     }
 
     save_robot_to_memory(cur_robot, &mf, savegame, file_version);
@@ -773,7 +773,7 @@ void save_scroll(struct scroll *cur_scroll, struct zip_archive *zp,
 
     buffer = cmalloc(actual_size);
 
-    mfopen(buffer, actual_size, &mf);
+    mfopen_wr(buffer, actual_size, &mf);
 
     save_prop_w(SCRPROP_NUM_LINES, cur_scroll->num_lines, &mf);
     save_prop_a(SCRPROP_MESG, cur_scroll->mesg, scroll_size, 1, &mf);
@@ -793,7 +793,7 @@ void save_sensor(struct sensor *cur_sensor, struct zip_archive *zp,
 
   if(cur_sensor->used)
   {
-    mfopen(buffer, SENSOR_PROPS_SIZE, &mf);
+    mfopen_wr(buffer, SENSOR_PROPS_SIZE, &mf);
 
     save_prop_s_293(SENPROP_SENSOR_NAME, cur_sensor->sensor_name, ROBOT_NAME_SIZE, &mf);
     save_prop_c(SENPROP_SENSOR_CHAR, cur_sensor->sensor_char, &mf);
@@ -2535,12 +2535,13 @@ static void display_robot_line(struct world *mzx_world, char *program,
     case ROBOTIC_CMD_MESSAGE_BOX_LINE: // Normal message
     {
       // On the off-chance something actually relies on this bug...
-      boolean allow_tabs =
-       ((mzx_world->version >= VERSION_PORT) && (mzx_world->version < V291));
+      int flags = 0;
+      if((mzx_world->version >= VERSION_PORT) && (mzx_world->version < V291))
+        flags |= WR_TAB;
 
       tr_msg(mzx_world, program + 3, id, ibuff);
       ibuff[64] = 0; // Clip
-      write_string_ext(ibuff, 8, y, scroll_base_color, allow_tabs, 0, 0);
+      write_string_ext(ibuff, 8, y, scroll_base_color, flags, 0, 0);
       break;
     }
 
