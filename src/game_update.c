@@ -637,6 +637,9 @@ static void end_life(struct world *mzx_world)
   sfx_clear_queue();
   play_sfx(mzx_world, SFX_DEATH);
 
+  if(mzx_world->version >= V293)
+    send_robot_def(mzx_world, 0, LABEL_PLAYERDIED);
+
   // Go somewhere else?
   if(death_board != DEATH_SAME_POS)
   {
@@ -771,6 +774,12 @@ static void draw_message(struct world *mzx_world)
   char *lines[25];
   int i = 1;
   int j;
+
+  /* Safety check: bad values can get into these vars from
+   * old worlds/saves and cause out-of-bounds draws. */
+  if(mesg_y < 0 || mesg_y >= SCREEN_H ||
+   cur_board->b_mesg_col < -1 || cur_board->b_mesg_col >= SCREEN_W)
+    return;
 
   /* Always at least one line.. */
   lines[0] = cur_board->bottom_mesg;
@@ -943,16 +952,18 @@ boolean update_resolve_target(struct world *mzx_world,
   char *level_id = src_board->level_id;
   char *level_color = src_board->level_color;
   char *level_under_id = src_board->level_under_id;
+  int i;
 
   if(mzx_world->target_where != TARGET_NONE)
   {
     int saved_player_last_dir = src_board->player_last_dir;
     int target_board = mzx_world->target_board;
+    boolean is_different_board = false;
     boolean load_assets = false;
 
     // TELEPORT or ENTRANCE.
-    // Destroy message, bullets, spitfire?
 
+    // Destroy message, bullets, spitfire?
     if(mzx_world->clear_on_exit)
     {
       int offset;
@@ -967,6 +978,18 @@ boolean update_resolve_target(struct world *mzx_world,
       }
     }
 
+    // Sprites can also optionally be disabled on exit.
+    for(i = 0; i < MAX_SPRITES; i++)
+    {
+      struct sprite *spr = mzx_world->sprite_list[i];
+
+      if((spr->flags & SPRITE_INITIALIZED) && (spr->flags & SPRITE_OFF_ON_EXIT))
+      {
+        spr->flags &= ~SPRITE_INITIALIZED;
+        mzx_world->active_sprites--;
+      }
+    }
+
     // Load board
     mzx_world->under_player_id = (char)SPACE;
     mzx_world->under_player_param = 0;
@@ -974,6 +997,9 @@ boolean update_resolve_target(struct world *mzx_world,
     mzx_world->current_cycle_odd = false;
 
     if(mzx_world->current_board_id != target_board)
+      is_different_board = true;
+
+    if(is_different_board || src_board->reset_on_entry_same_board)
     {
       change_board(mzx_world, target_board);
       load_assets = true;
@@ -990,7 +1016,6 @@ boolean update_resolve_target(struct world *mzx_world,
     // Find target x/y
     if(mzx_world->target_where == TARGET_ENTRANCE)
     {
-      int i;
       int tmp_x[5];
       int tmp_y[5];
       int x, y, offset;
@@ -1153,12 +1178,19 @@ boolean update_resolve_target(struct world *mzx_world,
       vquick_fadeout();
     }
 
-    // Load the new board's charset and palette, if necessary
+    // Load the new board's charset and palette, if necessary.
+    // If reset/load on same board is set, this should always be done.
     if(load_assets)
-    {
-      // Load board's mod unless it's the same mod playing.
-      load_game_module(mzx_world, src_board->mod_playing, true);
       change_board_load_assets(mzx_world);
+
+    if(is_different_board)
+    {
+      /* Load board's mod unless it's the same mod playing.
+       * Note: this was performed at the start of the NEXT cycle prior to 2.91g.
+       * Note: prior to 2.91g this wasn't conditional on is_different_board,
+       * but the difference should be irrelevant.
+       */
+      load_game_module(mzx_world, src_board->mod_playing, true);
 
 #ifdef CONFIG_EDITOR
       // Also, update the caption to indicate the current board.

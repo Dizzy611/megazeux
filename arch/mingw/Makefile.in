@@ -2,14 +2,7 @@
 # mingw makefile generics
 #
 
-CC      = ${MINGWBASE}gcc
-CXX     = ${MINGWBASE}g++
-AR      = ${MINGWBASE}ar
-OBJCOPY = ${MINGWBASE}objcopy
-STRIP   = ${MINGWBASE}strip --strip-unneeded
-WINDRES = ${MINGWBASE}windres
 PEFIX   = ${pefix}
-
 BINEXT  = .exe
 
 DSOLDFLAGS = -shared
@@ -32,6 +25,10 @@ ARCH_LDFLAGS += -static-libstdc++ -static-libgcc
 # MINGW builds. MINGW likes to link these however it wants otherwise.
 LINK_STATIC_IF_MIXED  ?= -Wl,-Bstatic
 LINK_DYNAMIC_IF_MIXED ?= -Wl,-Bdynamic
+
+# In Fedora, libmingwex dirent is compiled with stack protector now, so
+# libssp must manually be linked (and therefore libmingwex too).
+ARCH_LIBS += ${LINK_STATIC_IF_MIXED} -lmingwex -lssp
 
 # OpenGL must be linked to MZX
 core_ldflags += -lopengl32

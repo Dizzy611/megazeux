@@ -6,15 +6,19 @@ usage() {
 	echo "usage: ./config.sh --platform [platform] <--prefix [dir]> <--sysconfdir [dir]>"
 	echo "                                         <--gamesdir [dir]> <--bindir [dir]>"
 	echo "                                         <--sharedir [dir]> <--licensedir [dir]>"
-	echo "                                         <options..>"
+	echo "                                         <--host [name]> <options..>"
 	echo
-	echo "  --prefix       Where dependencies should be found."
-	echo "  --sysconfdir   Where the config should be read from."
-	echo "  --gamesdir     Where binaries should be installed."
-	echo "  --libdir       Where libraries should be installed."
-	echo "  --bindir       Where utilities should be installed."
-	echo "  --sharedir     Where resources should be installed."
-	echo "  --licensedir   Where licenses should be installed."
+	echo "  --prefix       Install prefix and where dependencies should be found. (/usr)"
+	echo "  --sysconfdir   Where the config should be read from. (/etc)"
+	echo "  --gamesdir     Where binaries should be installed. (/usr/games)"
+	echo "  --libdir       Where libraries should be installed. (/usr/lib)"
+	echo "  --bindir       Where utilities should be installed. (/usr/bin)"
+	echo "  --sharedir     Where resources should be installed. (/usr/share)"
+	echo "  --licensedir   Where licenses should be installed. (/usr/share/doc)"
+	echo "  --host         Specify cross toolchain prefix for Linux et al. (none)"
+	echo
+	echo "  Install directories can be disregarded for builds for platforms"
+	echo "  with a monolithic directory structure e.g. Windows."
 	echo
 	echo "Supported [platform] values:"
 	echo
@@ -30,10 +34,12 @@ usage() {
 	echo "  psp            Experimental PSP port"
 	echo "  gp2x           Experimental GP2X port"
 	echo "  nds            Experimental NDS port"
+	echo "  nds-blocksds   Experimental NDS (BlocksDS) port"
 	echo "  3ds            Experimental 3DS port"
 	echo "  switch         Experimental Switch port"
 	echo "  wii            Experimental Wii port"
 	echo "  wiiu           Experimental Wii U port"
+	echo "  psvita         Experimental PS Vita port"
 	echo "  dreamcast      Experimental Dreamcast port"
 	echo "  amiga          Experimental AmigaOS 4 port"
 	echo "  android        Experimental Android port"
@@ -124,6 +130,7 @@ usage() {
 # Default settings for flags (used if unspecified)
 #
 PLATFORM=""
+TOOL_PREFIX=""
 PREFIX="/usr"
 PREFIX_IS_SET="false"
 SYSCONFDIR="/etc"
@@ -143,6 +150,7 @@ SHAREDIR="${PREFIX}${SHAREDIR_IN_PREFIX}"
 LICENSEDIR_IS_SET="false"
 LICENSEDIR_IN_PREFIX="/share/doc"
 LICENSEDIR="${PREFIX}${LICENSEDIR_IN_PREFIX}"
+USERCONFFILE=""
 DATE_STAMP="true"
 AS_NEEDED="false"
 RELEASE="false"
@@ -275,6 +283,12 @@ while [ "$1" != "" ]; do
 		shift
 		LICENSEDIR="$1"
 		LICENSEDIR_IS_SET="true"
+	fi
+
+	# e.g. --host arm-none-eabi
+	if [ "$1" = "--host" ]; then
+		shift
+		TOOL_PREFIX="$1"
 	fi
 
 	[ "$1" = "--as-needed-hack" ] && AS_NEEDED="true"
@@ -497,13 +511,12 @@ if [ "$PLATFORM" = "win32"   ] || [ "$PLATFORM" = "win64" ] ||
 
 	[ "$PLATFORM" = "win32" ] || [ "$PLATFORM" = "mingw32" ] && ARCHNAME=x86
 	[ "$PLATFORM" = "win64" ] || [ "$PLATFORM" = "mingw64" ] && ARCHNAME=x64
-	[ "$PLATFORM" = "mingw32" ] && MINGWBASE=i686-w64-mingw32-
-	[ "$PLATFORM" = "mingw64" ] && MINGWBASE=x86_64-w64-mingw32-
+	[ "$PLATFORM" = "mingw32" ] && [ "$TOOL_PREFIX" = "" ] && TOOL_PREFIX=i686-w64-mingw32
+	[ "$PLATFORM" = "mingw64" ] && [ "$TOOL_PREFIX" = "" ] && TOOL_PREFIX=x86_64-w64-mingw32
 	PLATFORM="mingw"
 	echo "#define PLATFORM \"windows-$ARCHNAME\"" > src/config.h
 	echo "SUBPLATFORM=windows-$ARCHNAME"         >> platform.inc
 	echo "PLATFORM=$PLATFORM"                    >> platform.inc
-	echo "MINGWBASE=$MINGWBASE"                  >> platform.inc
 elif [ "$PLATFORM" = "unix" ] || [ "$PLATFORM" = "unix-devel" ]; then
 	OS="$(uname -s)"
 	MACH="$(uname -m)"
@@ -599,6 +612,10 @@ else
 	LIBDIR="."
 fi
 
+if [ "$TOOL_PREFIX" != "" ]; then
+	echo "CROSS_COMPILE?=$TOOL_PREFIX-" >> platform.inc
+fi
+
 ### SYSTEM CONFIG DIRECTORY ###################################################
 
 if [ "$PLATFORM" = "unix" ] || [ "$PLATFORM" = "darwin" ]; then
@@ -616,6 +633,9 @@ fi
 echo "Building for platform:   $PLATFORM"
 echo "Using prefix:            $PREFIX"
 echo "Using sysconfdir:        $SYSCONFDIR"
+if [ "$TOOL_PREFIX" != "" ]; then
+echo "Using host:              $TOOL_PREFIX"
+fi
 echo
 
 ### GENERATE CONFIG.H HEADER ##################################################
@@ -635,79 +655,72 @@ else
 	echo "Not stamping version with today's date."
 fi
 
+if command -v git && git rev-parse --short HEAD 2>/dev/null; then
+	echo "#define VERSION_HEAD \"$(git rev-parse --short HEAD)\"" >> src/config.h
+fi
+
+if [ "$PRERELEASE" = "1" ]; then
+	echo "#define VERSION_PRERELEASE" >> src/config.h
+fi
+
 echo "#define CONFDIR \"$SYSCONFDIR/\"" >> src/config.h
 
 #
-# Some platforms may have filesystem hierarchies they need to fit into
-# FIXME: SHAREDIR should be hardcoded in fewer cases
+# Some platforms (currently "unix", "darwin") are system installations.
+# Their assets and licenses are located in subdirectories of their
+# respective filesystem hierarchies. For other platforms, these files are
+# located in the base directory of the archive (the executable location).
+# This location needs to be hardcoded for various console platforms.
 #
 if [ "$PLATFORM" = "unix" ] || [ "$PLATFORM" = "darwin" ]; then
-	echo "#define CONFFILE \"megazeux-config\""      >> src/config.h
-	echo "#define SHAREDIR \"$SHAREDIR/megazeux/\""  >> src/config.h
-	echo "#define USERCONFFILE \".megazeux-config\"" >> src/config.h
-elif [ "$PLATFORM" = "nds" ]; then
+	USERCONFFILE=".megazeux-config"
+elif [ "$PLATFORM" = "nds" ] || [ "$PLATFORM" = "nds-blocksds" ]; then
 	SHAREDIR=/games/megazeux
-	LICENSEDIR=$SHAREDIR
-	GAMESDIR=$SHAREDIR
-	BINDIR=$SHAREDIR
-	echo "#define CONFFILE \"config.txt\"" >> src/config.h
-	echo "#define SHAREDIR \"$SHAREDIR\""  >> src/config.h
 elif [ "$PLATFORM" = "3ds" ]; then
 	SHAREDIR=/3ds/megazeux
-	LICENSEDIR=$SHAREDIR
-	GAMESDIR=$SHAREDIR
-	BINDIR=$SHAREDIR
-	echo "#define CONFFILE \"config.txt\"" >> src/config.h
-	echo "#define SHAREDIR \"$SHAREDIR\""  >> src/config.h
 elif [ "$PLATFORM" = "dreamcast" ]; then
 	SHAREDIR=/cd
-	GAMESDIR=$SHAREDIR
-	BINDIR=$SHAREDIR
-	echo "#define CONFFILE \"config.txt\"" >> src/config.h
-	echo "#define SHAREDIR \"$SHAREDIR\""  >> src/config.h
 elif [ "$PLATFORM" = "wii" ]; then
 	SHAREDIR=/apps/megazeux
-	LICENSEDIR=$SHAREDIR
-	GAMESDIR=$SHAREDIR
-	BINDIR=$SHAREDIR
-	echo "#define CONFFILE \"config.txt\"" >> src/config.h
-	echo "#define SHAREDIR \"$SHAREDIR\""  >> src/config.h
 elif [ "$PLATFORM" = "wiiu" ]; then
 	SHAREDIR=fs:/vol/external01/wiiu/apps/megazeux
-	LICENSEDIR=$SHAREDIR
-	GAMESDIR=$SHAREDIR
-	BINDIR=$SHAREDIR
-	echo "#define CONFFILE \"config.txt\"" >> src/config.h
-	echo "#define SHAREDIR \"$SHAREDIR\""  >> src/config.h
 elif [ "$PLATFORM" = "switch" ]; then
 	SHAREDIR=/switch/megazeux
-	LICENSEDIR=$SHAREDIR
-	GAMESDIR=$SHAREDIR
-	BINDIR=$SHAREDIR
-	echo "#define CONFFILE \"config.txt\"" >> src/config.h
-	echo "#define SHAREDIR \"$SHAREDIR\""  >> src/config.h
+elif [ "$PLATFORM" = "psvita" ]; then
+	SHAREDIR="app0:/"
+	STARTUPDIR="ux0:/data/megazeux"
+	USERCONFFILE="ux0:/data/megazeux/config.txt"
 elif [ "$PLATFORM" = "darwin-dist" ]; then
 	SHAREDIR=../Resources
-	LICENSEDIR=$SHAREDIR
-	GAMESDIR=$SHAREDIR
-	BINDIR=$SHAREDIR
-	echo "#define CONFFILE \"config.txt\""           >> src/config.h
-	echo "#define SHAREDIR \"$SHAREDIR\""            >> src/config.h
-	echo "#define USERCONFFILE \".megazeux-config\"" >> src/config.h
+	USERCONFFILE=".megazeux-config"
 elif [ "$PLATFORM" = "emscripten" ]; then
 	SHAREDIR=/data
-	LICENSEDIR=$SHAREDIR
-	GAMESDIR=$SHAREDIR/game
-	BINDIR=$SHAREDIR
-	echo "#define CONFFILE \"config.txt\"" >> src/config.h
-	echo "#define SHAREDIR \"$SHAREDIR\""  >> src/config.h
+elif [ "$PLATFORM" = "android" ]; then
+	SHAREDIR=.
+	STARTUPDIR="/storage/emulated/0"
 else
 	SHAREDIR=.
-	LICENSEDIR=.
-	GAMESDIR=.
-	BINDIR=.
-	echo "#define CONFFILE \"config.txt\"" >> src/config.h
-	echo "#define SHAREDIR \"$SHAREDIR\""  >> src/config.h
+fi
+
+if [ "$PLATFORM" = "unix" ] || [ "$PLATFORM" = "darwin" ]; then
+	echo "#define CONFFILE \"megazeux-config\""		>> src/config.h
+	echo "#define SHAREDIR \"$SHAREDIR/megazeux/\""		>> src/config.h
+	echo "#define LICENSEDIR \"$LICENSEDIR/megazeux/\""	>> src/config.h
+else
+	LICENSEDIR="."
+	GAMESDIR=$SHAREDIR
+	BINDIR=$SHAREDIR
+	echo "#define CONFFILE \"config.txt\""			>> src/config.h
+	echo "#define SHAREDIR \"$SHAREDIR\""			>> src/config.h
+	echo "#define LICENSEDIR \"$LICENSEDIR\""		>> src/config.h
+fi
+
+if [ -n "$USERCONFFILE" ]; then
+	echo "#define USERCONFFILE \"$USERCONFFILE\""		>> src/config.h
+fi
+
+if [ -n "$STARTUPDIR" ]; then
+	echo "#define STARTUPDIR \"$STARTUPDIR\""		>> src/config.h
 fi
 
 #
@@ -726,6 +739,7 @@ echo "LICENSEDIR=$LICENSEDIR" >> platform.inc
 #
 if [ "$PLATFORM" = "3ds" ] ||
    [ "$PLATFORM" = "nds" ] ||
+   [ "$PLATFORM" = "nds-blocksds" ] ||
    [ "$PLATFORM" = "djgpp" ] ||
    [ "$PLATFORM" = "dreamcast" ] ||
    [ "$PLATFORM" = "egl" ]; then
@@ -783,16 +797,6 @@ if [ "$SDL" = "false" ] && [ "$EGL" = "false" ]; then
 fi
 
 #
-# The stack protector may cause issues with various C++ features (platform
-# matrix claims it breaks exceptions) in some versions of MinGW. This hasn't
-# been verified (and MZX doesn't use exceptions), but for now just disable it.
-#
-if [ "$PLATFORM" = "mingw" ]; then
-	echo "Force-disabling stack protector on Windows."
-	STACK_PROTECTOR="false"
-fi
-
-#
 # Force-disable features unnecessary on Emscripten.
 #
 if [ "$PLATFORM" = "emscripten" ]; then
@@ -818,7 +822,7 @@ fi
 # If the NDS arch is enabled, some code has to be compile time
 # enabled too.
 #
-if [ "$PLATFORM" = "nds" ]; then
+if [ "$PLATFORM" = "nds" ] || [ "$PLATFORM" = "nds-blocksds" ]; then
 	echo "Enabling NDS-specific hacks."
 	echo "#define CONFIG_NDS" >> src/config.h
 	echo "BUILD_NDS=1" >> platform.inc
@@ -844,6 +848,12 @@ if [ "$PLATFORM" = "nds" ]; then
 	OPENMPT="false"
 	REALITY="false"
 	VORBIS="false"
+fi
+
+if [ "$PLATFORM" = "nds-blocksds" ]; then
+	echo "Enabling BlocksDS-specific hacks."
+	echo "#define CONFIG_NDS_BLOCKSDS" >> src/config.h
+	echo "BUILD_NDS_BLOCKSDS=1" >> platform.inc
 fi
 
 #
@@ -944,6 +954,22 @@ if [ "$PLATFORM" = "psp" ]; then
 fi
 
 #
+# If the PS Vita arch is enabled, some code has to be compile time
+# enabled too.
+#
+if [ "$PLATFORM" = "psvita" ]; then
+	echo "Enabling PS Vita-specific hacks."
+	echo "#define CONFIG_PSVITA" >> src/config.h
+	echo "BUILD_PSVITA=1" >> platform.inc
+
+	echo "Force-disabling utils on PS Vita."
+	UTILS="false"
+
+	echo "Force-disabling stack protector on PS Vita."
+	STACK_PROTECTOR="false"
+fi
+
+#
 # If the DJGPP arch is enabled, some code has to be compile time
 # enabled too.
 #
@@ -1013,6 +1039,7 @@ fi
 if [ "$PLATFORM" = "psp" ] ||
    [ "$PLATFORM" = "gp2x" ] ||
    [ "$PLATFORM" = "nds" ] ||
+   [ "$PLATFORM" = "nds-blocksds" ] ||
    [ "$PLATFORM" = "3ds" ] ||
    [ "$PLATFORM" = "wii" ] ||
    [ "$PLATFORM" = "wiiu" ] ||
@@ -1102,6 +1129,7 @@ fi
 #
 if [ "$PLATFORM" = "gp2x" ] ||
    [ "$PLATFORM" = "nds" ] ||
+   [ "$PLATFORM" = "nds-blocksds" ] ||
    [ "$PLATFORM" = "3ds" ] ||
    [ "$PLATFORM" = "wii" ] ||
    [ "$PLATFORM" = "wiiu" ] ||
@@ -1109,6 +1137,7 @@ if [ "$PLATFORM" = "gp2x" ] ||
    [ "$PLATFORM" = "android" ] ||
    [ "$PLATFORM" = "emscripten" ] ||
    [ "$PLATFORM" = "psp" ] ||
+   [ "$PLATFORM" = "psvita" ] ||
    [ "$PLATFORM" = "djgpp" ] ||
    [ "$PLATFORM" = "dreamcast" ]; then
 	echo "Force-disabling modular build (nonsensical or unsupported)."
@@ -1120,7 +1149,8 @@ fi
 #
 if [ "$EDITOR" = "false" ] ||
    [ "$PLATFORM" = "djgpp" ] ||
-   [ "$PLATFORM" = "nds" ]; then
+   [ "$PLATFORM" = "nds" ] ||
+   [ "$PLATFORM" = "nds-blocksds" ]; then
 	echo "Force-disabling networking (unsupported platform or editor disabled)."
 	NETWORK="false"
 fi
@@ -1388,6 +1418,7 @@ if [ "$ICON" = "true" ]; then
 	   [ "$PLATFORM" = "gp2x" ] ||
 	   [ "$PLATFORM" = "psp" ] ||
 	   [ "$PLATFORM" = "nds" ] ||
+	   [ "$PLATFORM" = "nds-blocksds" ] ||
 	   [ "$PLATFORM" = "wii" ] ||
 	   [ "$PLATFORM" = "djgpp" ] ||
 	   [ "$PLATFORM" = "dreamcast" ]; then

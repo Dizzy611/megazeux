@@ -36,6 +36,7 @@ name                      r/w      g/n/f/b    i
 "C_DIVISIONS"             r w         b       *
 "DATE_DAY"                r           f       *
 "DATE_MONTH"              r           f       *
+"DATE_WEEKDAY"            r           f       *
 "DATE_YEAR"               r           f       *
 "DIVIDER"                 r w         b       *
 "ENTER_MENU"              r w         n       *
@@ -68,6 +69,7 @@ name                      r/w      g/n/f/b    i
 "KEY"                     r           b       *
 "KEY_CODE"                r           b       *
 "KEY_PRESSED"             r           b       *
+"KEY_PRESSEDn"            r           b       *
 "KEY_RELEASE"             r           b       *
 "KEYn"                    r           b       *
 "LASTXPOS"                r w         n       *
@@ -137,7 +139,9 @@ name                      r/w      g/n/f/b    i
 "SPRn_CX"                 r w         b       *
 "SPRn_CY"                 r w         b       *
 "SPRn_HEIGHT"             r w         b       *
-"SPRn_OFF"                  w         f       *
+"SPRn_OFF"                r w         f       *
+"SPRn_OFFONEXIT"          r w         f       *
+"SPRn_OFFSET"             r w         b       *
 "SPRn_OVERLAID"             w         f       *
 "SPRn_OVERLAY"              w         f       *
 "SPRn_REFX"               r w         b       *
@@ -145,10 +149,13 @@ name                      r/w      g/n/f/b    i
 "SPRn_SETVIEW"              w         f       *
 "SPRn_STATIC"               w         b       *
 "SPRn_SWAP"                 w         f       *
+"SPRn_TCOL"               r w         b       *
+"SPRn_UNBOUND"            r w         f       *
 "SPRn_VLAYER"               w         f       *
 "SPRn_WIDTH"              r w         b       *
 "SPRn_X"                  r w         b       *
 "SPRn_Y"                  r w         b       *
+"SPRn_Z"                  r w         b       *
 "SQRTn"                   r           f       *
 "TAN"                     r           f       *
 "THISX"                   r           b       *
@@ -158,6 +165,7 @@ name                      r/w      g/n/f/b    i
 "TIME"                    r w         n       *
 "TIMERESET"               r w         b       *
 "TIME_HOURS"              r           f       *
+"TIME_MILLIS"             r           f       *
 "TIME_MINUTES"            r           f       *
 "TIME_SECONDS"            r           f       *
 "UCHn,n"                  r           b       *
@@ -167,6 +175,10 @@ name                      r/w      g/n/f/b    i
 "VCHn,n"                  r w         b       *
 "VCOn,n"                  r w         b       *
 "VERTPLD"                 r           b       *
+"VIEWPORT_HEIGHT"         r           b       *
+"VIEWPORT_WIDTH"          r           b       *
+"VIEWPORT_X"              r           b       *
+"VIEWPORT_Y"              r           b       *
 "VLAYER_HEIGHT"           r w         b       *
 "VLAYER_SIZE"             r w         b       *
 "VLAYER_WIDTH"            r w         b       *

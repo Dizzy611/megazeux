@@ -141,8 +141,8 @@ static void palette_idx_table_init(void)
 
 static void nds_subscreen_scaled_init(void)
 {
-  int xscale = (int)(320.0/256.0 * 256.0);
-  int yscale = (int)(350.0/subscreen_height * 256.0);
+  int xscale = (int)(320 * 256 / 256);
+  int yscale = (int)(350 * 256 / subscreen_height);
 
   /* Use banks A and B for the MZX screen. */
   videoSetMode(MODE_5_2D | DISPLAY_BG0_ACTIVE | DISPLAY_BG1_ACTIVE | DISPLAY_BG2_ACTIVE | DISPLAY_BG3_ACTIVE);
@@ -260,6 +260,19 @@ void nds_video_jitter(void)
 void nds_video_rasterhack(void)
 {
   /* Prepare DMA transfer. */
+#ifdef CONFIG_NDS_BLOCKSDS
+  dmaStopSafe(1);
+  REG_BG0VOFS_SUB = scroll_table[0];
+  dmaSetParams(1, (scroll_table + 1), (void*) &REG_BG0VOFS_SUB,
+                    DMA_DST_FIX | DMA_SRC_INC | DMA_REPEAT | DMA_16_BIT |
+                    DMA_START_HBL | DMA_ENABLE | 1);
+
+  dmaStopSafe(2);
+  REG_BG1VOFS_SUB = scroll_table[0];
+  dmaSetParams(2, (scroll_table + 1), (void*) &REG_BG1VOFS_SUB,
+                    DMA_DST_FIX | DMA_SRC_INC | DMA_REPEAT | DMA_16_BIT |
+                    DMA_START_HBL | DMA_ENABLE | 1);
+#else
   DMA1_CR         = 0;
   REG_BG0VOFS_SUB = scroll_table[0];
   DMA1_SRC        = (u32)(scroll_table + 1);
@@ -273,6 +286,7 @@ void nds_video_rasterhack(void)
   DMA2_DEST       = (u32)&REG_BG1VOFS_SUB;
   DMA2_CR         = DMA_DST_FIX | DMA_SRC_INC | DMA_REPEAT | DMA_16_BIT |
                     DMA_START_HBL | DMA_ENABLE | 1;
+#endif
 }
 
 // Handle the transition animation.
@@ -367,8 +381,13 @@ void nds_sleep_check(void)
   if(keysDown() & KEY_LID)
   {
     // Cancel DMA from raster effects.
+#ifdef CONFIG_NDS_BLOCKSDS
+    dmaStopSafe(1);
+    dmaStopSafe(2);
+#else
     DMA1_CR = 0;
     DMA2_CR = 0;
+#endif
 
     // Power everything off.
     powerOff(POWER_ALL);
@@ -533,12 +552,16 @@ static void nds_render_graph_scaled(struct graphics_data *graphics)
     if(graph_cache[chars] != key)
     {
       graph_cache[chars] = key;
+      // Avoid reading from RAM to cache twice.
+      chr = key & 0x1FF;
+      bg  = (key >> 16) & 0x0F;
+      fg  = (key >> 24) & 0x0F;
 #else
     {
-#endif
       chr = (*text_cell).char_value & 0x1FF;
       bg  = (*text_cell).bg_color   & 0x0F;
       fg  = (*text_cell).fg_color   & 0x0F;
+#endif
 
       // Construct a table mapping charset two-bit pairs to palette entries.
       if(chr & 0x100) // Protected palette

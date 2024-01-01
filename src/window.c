@@ -3054,7 +3054,8 @@ struct file_list_entry
  */
 static void file_list_get_mzx_world_name(struct file_list_entry *entry)
 {
-  vfile *mzx_file = vfopen_unsafe(entry->filename, "rb");
+  // Don't add this file to the cache as there may be a LOT of these.
+  vfile *mzx_file = vfopen_unsafe_ext(entry->filename, "rb", V_DONT_CACHE);
   char *world_name = entry->display + MAX_FILE_LIST_DISPLAY_MZX;
 
   if(!vfread(world_name, 24, 1, mzx_file))
@@ -3302,6 +3303,16 @@ static boolean remove_files(char *directory_name, boolean remove_recursively)
   return success;
 }
 
+#ifdef CONFIG_PSVITA
+static const char *psvita_drives[] = {
+  "app0:",
+  "imc0:",
+  "uma0:",
+  "ux0:"
+};
+#define PSVITA_DRIVES_COUNT 4
+#endif
+
 __editor_maybe_static int file_manager(struct world *mzx_world,
  const char *const *wildcards, const char *default_ext, char *ret,
  const char *title, enum allow_dirs allow_dirs, enum allow_new allow_new,
@@ -3332,7 +3343,6 @@ __editor_maybe_static int file_manager(struct world *mzx_world,
   int list_length = 17 - ext_height;
   int last_element = FILESEL_FILE_LIST;
   boolean return_dir_is_base_dir = true;
-  boolean show_parent_dir;
   int i;
 
 #ifdef __WIN32__
@@ -3406,17 +3416,9 @@ __editor_maybe_static int file_manager(struct world *mzx_world,
     // Hide .. if changing directories isn't allowed or if the selected file
     // should be in the current directory or a subdirectory of it. Also hide it
     // if this is a root directory.
-    if(allow_dirs == NO_DIRS ||
-     (allow_dirs == ALLOW_SUBDIRS && !strcmp(current_dir_name, base_dir_name)) ||
-     path_is_root(current_dir_name))
-    {
-      show_parent_dir = false;
-    }
-    else
-      show_parent_dir = true;
-
-#if defined(CONFIG_3DS) || defined(CONFIG_SWITCH) || defined(CONFIG_WIIU) || defined(CONFIG_DREAMCAST)
-    if(show_parent_dir)
+    if(!(allow_dirs == NO_DIRS) &&
+     !(allow_dirs == ALLOW_SUBDIRS && !strcmp(current_dir_name, base_dir_name)) &&
+     !path_is_root(current_dir_name))
     {
       dir_list[num_dirs] = cmalloc(3);
       dir_list[num_dirs][0] = '.';
@@ -3424,7 +3426,6 @@ __editor_maybe_static int file_manager(struct world *mzx_world,
       dir_list[num_dirs][2] = '\0';
       num_dirs++;
     }
-#endif
 
     while(1)
     {
@@ -3434,8 +3435,8 @@ __editor_maybe_static int file_manager(struct world *mzx_world,
 
       file_name_length = strlen(file_name);
 
-      // Exclude . and hidden files
-      if(file_name[0] == '.' && file_name[1] != '.')
+      // Exclude ./.. and hidden files
+      if(file_name[0] == '.')
         continue;
 
       // The file type value from dirent isn't particularly reliable; might
@@ -3455,9 +3456,7 @@ __editor_maybe_static int file_manager(struct world *mzx_world,
 
       if(dir_type == DIR_TYPE_DIR)
       {
-        // Exclude .. from base dir in subdirsonly mode
-        if(allow_dirs != NO_DIRS &&
-         !(!show_parent_dir && !strcmp(file_name, "..")))
+        if(allow_dirs != NO_DIRS)
         {
           dir_list[num_dirs] = cmalloc(file_name_length + 1);
           memcpy(dir_list[num_dirs], file_name, file_name_length + 1);
@@ -3575,6 +3574,31 @@ skip_dir:
         {
           dir_list[num_dirs] = cmalloc(strlen(devoptab_list[i]->name) + 3);
           sprintf(dir_list[num_dirs], "%s:/", devoptab_list[i]->name);
+
+          num_dirs++;
+
+          if(num_dirs == total_dirnames_allocated)
+          {
+            dir_list = crealloc(dir_list, sizeof(char *) *
+             total_dirnames_allocated * 2);
+            memset(dir_list + total_dirnames_allocated, 0,
+             sizeof(char *) * total_dirnames_allocated);
+            total_dirnames_allocated *= 2;
+          }
+        }
+      }
+    }
+#endif
+
+#ifdef CONFIG_PSVITA
+    if(allow_dirs == ALLOW_ALL_DIRS)
+    {
+      for(i = 0; i < PSVITA_DRIVES_COUNT; i++)
+      {
+        if(vstat(psvita_drives[i], &file_info) >= 0)
+        {
+          dir_list[num_dirs] = cmalloc(strlen(psvita_drives[i]) + 2);
+          sprintf(dir_list[num_dirs], "%s/", psvita_drives[i]);
 
           num_dirs++;
 

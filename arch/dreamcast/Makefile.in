@@ -14,11 +14,22 @@ endif
 
 EXTRA_LICENSES += ${LICENSE_NEWLIB}
 
+#
+# Dreamcast target rules
+#
+
 CC      := kos-cc
 CXX     := kos-c++
 AR      := kos-ar
 OBJCOPY := kos-objcopy
 STRIP   := kos-strip
+
+# Disable rules that require target code to run natively.
+SUPPRESS_HOST_TARGETS ?= 1
+
+#
+# Override library paths
+#
 
 SDL_CFLAGS := -I"${KOS_PORTS}"/SDL/inst/include
 SDL_LDFLAGS := -L"${KOS_PORTS}"/SDL/inst/lib -lSDL

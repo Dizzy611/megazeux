@@ -1145,6 +1145,7 @@ void run_robot(context *ctx, int id, int x, int y)
   mzx_world->first_prefix = 0;
   mzx_world->mid_prefix = 0;
   mzx_world->last_prefix = 0;
+  mzx_world->command_cache = 0;
 
   if(id < 0)
   {
@@ -1287,6 +1288,7 @@ void run_robot(context *ctx, int id, int x, int y)
     // Get command number
     cmd = cmd_ptr[0];
 
+#ifdef CONFIG_EDITOR
     // Check to see if the current command triggers a breakpoint.
     if(mzx_world->editing && debug_robot_break)
     {
@@ -1306,6 +1308,7 @@ void run_robot(context *ctx, int id, int x, int y)
           return;
       }
     }
+#endif
 
     // Act according to command
     switch(cmd)
@@ -2310,7 +2313,8 @@ void run_robot(context *ctx, int id, int x, int y)
 
             for(i = check_color; i < MAX_SPRITES; i++)
             {
-              if(sprite_at_xy(mzx_world->sprite_list[i], check_x, check_y))
+              if(sprite_at_xy(mzx_world, mzx_world->sprite_list[i],
+               check_x, check_y))
                 break;
             }
             if(i == MAX_SPRITES)
@@ -2328,7 +2332,7 @@ void run_robot(context *ctx, int id, int x, int y)
           {
             if((unsigned int)check_param < 256)
             {
-              ret = sprite_at_xy(mzx_world->sprite_list[check_param],
+              ret = sprite_at_xy(mzx_world, mzx_world->sprite_list[check_param],
                check_x, check_y);
             }
           }
@@ -5294,9 +5298,7 @@ void run_robot(context *ctx, int id, int x, int y)
         int fx_num = parse_param(mzx_world, cmd_ptr + 1, id);
         char *p2 = next_param_pos(cmd_ptr + 1);
 
-        if(strlen(p2 + 1) >= SFX_SIZE)
-          p2[SFX_SIZE] = 0;
-        strcpy(mzx_world->custom_sfx + (fx_num * SFX_SIZE), p2 + 1);
+        sfx_set_string(&mzx_world->custom_sfx, fx_num, p2, strlen(p2));
         break;
       }
 
@@ -5974,6 +5976,7 @@ void run_robot(context *ctx, int id, int x, int y)
     mzx_world->first_prefix = 0;
     mzx_world->mid_prefix = 0;
     mzx_world->last_prefix = 0;
+    mzx_world->command_cache = 0;
 
     next_cmd_prefix:
     // Next line
@@ -5985,6 +5988,7 @@ void run_robot(context *ctx, int id, int x, int y)
       break;
     }
 
+#ifdef CONFIG_EDITOR
     // Check to see if a watchpoint triggered before incrementing the program.
     if(mzx_world->editing && debug_robot_watch)
     {
@@ -6005,6 +6009,7 @@ void run_robot(context *ctx, int id, int x, int y)
           return;
       }
     }
+#endif
 
     // If we're returning from a subroutine, we don't want to set the
     // pos_within_line. Other sends will set it to zero anyway.
@@ -6025,10 +6030,13 @@ void run_robot(context *ctx, int id, int x, int y)
     find_player(mzx_world);
 
     // Some commands can decrement lines_run, putting it at -1 here,
-    // so add 2 to lines_run for the check.
-    if((lines_run + 2) % 1000000 == 0)
+    // so add 2 to lines_run for the check. Originally this checked every 1 mil
+    // commands, but it turns out checking every 64k commands is faster due to
+    // better x86 optimizations using the lower word of lines_run.
+    if(((lines_run + 2) & 0xffff) == 0)
     {
-      if(peek_exit_input())
+      // Only check after 1 mil commands to reduce false positives.
+      if(lines_run >= 1000000 && peek_exit_input())
       {
         update_event_status();
 

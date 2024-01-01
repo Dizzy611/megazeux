@@ -42,7 +42,6 @@ struct extram_mspace_def
 enum extram_mspace
 {
   MSPACE_VRAM = 0,
-  MSPACE_TWL_WRAM,
   MSPACE_SLOT_2,
   MSPACE_COUNT
 };
@@ -64,9 +63,15 @@ static void nds_ext_print_info(void)
     info("Using extra VRAM for board storage.\n");
 #endif
 
+#ifdef CONFIG_NDS_BLOCKSDS
+#define SLOT2_NAME() peripheralSlot2GetName()
+#else
+#define SLOT2_NAME() ram_type_string()
+#endif
+
   if(nds_mspace_def[MSPACE_SLOT_2].start != 0)
     info("Using '%s' RAM expansion with capacity of %d (base %p).\n",
-     ram_type_string(), slot2_capacity, (void *)slot2_base);
+     SLOT2_NAME(), slot2_capacity, (void *)slot2_base);
   else
     info("No RAM expansion detected.\n");
 }
@@ -113,13 +118,21 @@ static void nds_ext_free(void *mem)
 static void nds_ext_unlock(void)
 {
   if(nds_mspace_def[MSPACE_SLOT_2].start != 0)
+#ifdef CONFIG_NDS_BLOCKSDS
+    peripheralSlot2Open(SLOT2_PERIPHERAL_EXTRAM);
+#else
     ram_unlock();
+#endif
 }
 
 static void nds_ext_lock(void)
 {
   if(nds_mspace_def[MSPACE_SLOT_2].start != 0)
+#ifdef CONFIG_NDS_BLOCKSDS
+    peripheralSlot2Close();
+#else
     ram_lock();
+#endif
 }
 
 /* Attempt to allocate a memory mapped buffer in extra RAM. */
@@ -158,7 +171,7 @@ static void nds_create_mspace_with_base(enum extram_mspace id, void *base, size_
   nds_mspace[id] = create_mspace_with_base(base, capacity, 0);
 }
 
-boolean nds_ram_init(RAM_TYPE type)
+boolean nds_ram_init(void)
 {
   int i;
 
@@ -177,8 +190,19 @@ boolean nds_ram_init(RAM_TYPE type)
   nds_create_mspace_with_base(MSPACE_VRAM, (u16 *)0x06840000, 0x06898000 - 0x06840000);
 #endif
 
+#ifdef CONFIG_NDS_BLOCKSDS
   // Check for RAM expansion.
-  if(ram_init(type))
+  if(peripheralSlot2Init(SLOT2_PERIPHERAL_EXTRAM) && peripheralSlot2RamStart())
+  {
+    // Initialize an mspace for this RAM.
+    slot2_base = peripheralSlot2RamStart();
+    slot2_capacity = peripheralSlot2RamSize();
+    nds_create_mspace_with_base(MSPACE_SLOT_2, slot2_base, slot2_capacity);
+    nds_ext_lock();
+  }
+#else
+  // Check for RAM expansion.
+  if(ram_init(DETECT_RAM))
   {
     // Initialize an mspace for this RAM.
     slot2_base = (u16 *)ram_unlock();
@@ -186,6 +210,7 @@ boolean nds_ram_init(RAM_TYPE type)
     nds_create_mspace_with_base(MSPACE_SLOT_2, slot2_base, slot2_capacity);
     nds_ext_lock();
   }
+#endif
 
   has_extmem = false;
   for(i = 0; i < MSPACE_COUNT; i++)

@@ -38,6 +38,7 @@ build := ${build_root}
 
 EXTRA_LICENSES ?=
 LICENSE_CC0    ?= arch/LICENSE.CC0
+LICENSE_DJGPP  ?= arch/LICENSE.DJGPP
 LICENSE_LGPL2  ?= arch/LICENSE.LGPL2
 LICENSE_MPL2   ?= arch/LICENSE.MPL2
 LICENSE_NEWLIB ?= arch/LICENSE.Newlib
@@ -48,8 +49,9 @@ CC      ?= gcc
 CXX     ?= g++
 AR      ?= ar
 AS      ?= as
-STRIP   ?= strip --strip-unneeded
+STRIP   ?= strip
 OBJCOPY ?= objcopy
+WINDRES ?= windres
 PEFIX   ?= true
 
 CHMOD   ?= chmod
@@ -59,6 +61,19 @@ LN      ?= ln
 MKDIR   ?= mkdir
 MV      ?= mv
 RM      ?= rm
+
+ifneq (${CROSS_COMPILE},)
+ifeq (${CC},cc)
+CC      = gcc
+endif
+CC      := ${CROSS_COMPILE}${CC}
+CXX     := ${CROSS_COMPILE}${CXX}
+AR      := ${CROSS_COMPILE}${AR}
+AS      := ${CROSS_COMPILE}${AS}
+STRIP   := ${CROSS_COMPILE}${STRIP}
+OBJCOPY := ${CROSS_COMPILE}${OBJCOPY}
+WINDRES := ${CROSS_COMPILE}${WINDRES}
+endif
 
 include arch/compat.inc
 
@@ -157,8 +172,7 @@ OPENMPT_LDFLAGS ?= $(LINK_STATIC_IF_MIXED) -L${PREFIX}/lib -lopenmpt
 # zlib
 #
 
-ZLIB_CFLAGS  ?= -I${PREFIX}/include \
-                -D_FILE_OFFSET_BITS=32 -U_LARGEFILE64_SOURCE
+ZLIB_CFLAGS  ?= -I${PREFIX}/include
 ZLIB_LDFLAGS ?= $(LINK_STATIC_IF_MIXED) -L${PREFIX}/lib -lz
 
 #
@@ -346,6 +360,14 @@ CXXFLAGS += -Wno-pedantic
 endif
 
 #
+# As does BlocksDS, currently
+#
+ifeq (${BUILD_NDS_BLOCKSDS},1)
+CFLAGS   += -Wno-strict-prototypes -Wno-pedantic -Wno-declaration-after-statement
+CXXFLAGS += -Wno-pedantic
+endif
+
+#
 # The following flags are not applicable to mingw or djgpp builds.
 #
 ifneq (${PLATFORM},mingw)
@@ -365,14 +387,20 @@ endif # PLATFORM=mingw
 
 #
 # The stack protector is optional and is generally only built for Linux/BSD and
-# Mac OS X. Windows and most embedded platforms currently disable this.
+# Mac OS X. It also works on Windows. GCC's -fstack-protector-strong is
+# preferred when available due to better performance.
 #
 ifeq (${BUILD_STACK_PROTECTOR},1)
+ifeq (${HAS_F_STACK_PROTECTOR_STRONG},1)
+CFLAGS   += -fstack-protector-strong
+CXXFLAGS += -fstack-protector-strong
+else
 ifeq (${HAS_F_STACK_PROTECTOR},1)
 CFLAGS   += -fstack-protector-all
 CXXFLAGS += -fstack-protector-all
 else
 $(warning stack protector not supported, ignoring.)
+endif
 endif
 endif
 
@@ -408,6 +436,7 @@ AR      := @${AR}
 AS      := @${AS}
 STRIP   := @${STRIP}
 OBJCOPY := @${OBJCOPY}
+WINDRES := @${WINDRES}
 PEFIX   := @${PEFIX}
 
 CHMOD   := @${CHMOD}
@@ -472,8 +501,10 @@ endif
 	${OBJCOPY} --only-keep-debug $< $@
 	${PEFIX} $@
 	${CHMOD} a-x $@
-	$(if ${V},,@echo "  STRIP   " $<)
-	${STRIP} $<
+ifneq (${NO_STRIP_IN_DEBUGLINK},1)
+	$(if ${V},,@echo "  STRIP   " --strip-unneeded $<)
+	${STRIP} --strip-unneeded $<
+endif
 	$(if ${V},,@echo "  OBJCOPY " --add-gnu-debuglink $@ $<)
 	${OBJCOPY} --add-gnu-debuglink=$@ $<
 	${PEFIX} $<
@@ -538,13 +569,14 @@ ifeq (${BUILD_UTILS},1)
 	${MKDIR} ${build}/utils
 	${CP} ${checkres} ${downver} ${build}/utils
 	${CP} ${hlp2txt} ${txt2hlp} ${build}/utils
-	${CP} ${ccv} ${png2smzx} ${build}/utils
+	${CP} ${ccv} ${png2smzx} ${y4m2smzx} ${build}/utils
 	@if [ -f "${checkres}.debug" ]; then cp ${checkres}.debug ${build}/utils; fi
 	@if [ -f "${downver}.debug" ]; then cp ${downver}.debug ${build}/utils; fi
 	@if [ -f "${hlp2txt}.debug" ]; then cp ${hlp2txt}.debug ${build}/utils; fi
 	@if [ -f "${txt2hlp}.debug" ]; then cp ${txt2hlp}.debug ${build}/utils; fi
 	@if [ -f "${ccv}.debug" ]; then cp ${ccv}.debug ${build}/utils; fi
 	@if [ -f "${png2smzx}.debug" ]; then cp ${png2smzx}.debug ${build}/utils; fi
+	@if [ -f "${y4m2smzx}.debug" ]; then cp ${y4m2smzx}.debug ${build}/utils; fi
 endif
 
 ${build}/docs: ${build}
@@ -576,6 +608,10 @@ endif
 ifeq (${BUILD_GAMECONTROLLERDB},1)
 	${CP} assets/gamecontrollerdb.txt \
 	 ${build}/assets
+endif
+ifeq (${BUILD_UTILS},1)
+	${CP} contrib/mzvplay/mzvplay.txt \
+	 ${build}/utils
 endif
 
 endif # !SUPPRESS_BUILD_TARGETS

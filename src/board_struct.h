@@ -59,9 +59,11 @@ struct board
   int forest_becomes;
   int collect_bombs;
   int fire_burns;
+  int dragons_can_randomly_move;
   int board_dir[4];
   int restart_if_zapped;
   int reset_on_entry;
+  int reset_on_entry_same_board;
   int time_limit;
   int last_key;
   int num_input;
@@ -88,6 +90,11 @@ struct board
   char *palette_path;
   size_t charset_path_allocated;
   size_t palette_path_allocated;
+  unsigned char blind_dur_v1;
+  unsigned char firewalker_dur_v1;
+  unsigned char freeze_time_dur_v1;
+  unsigned char slow_time_dur_v1;
+  unsigned char wind_dur_v1;
 
   int num_robots;
   int num_robots_active;

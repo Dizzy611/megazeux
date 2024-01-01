@@ -25,6 +25,8 @@
 __M_BEGIN_DECLS
 
 #include <stdio.h>
+#include <stdint.h>
+#include <time.h>
 
 #include "board_struct.h"
 #include "robot_struct.h"
@@ -34,6 +36,8 @@ __M_BEGIN_DECLS
 #include "io/vfile.h"
 #include "audio/sfx.h"
 
+#define COMMAND_CACHE_CURRENT_TIME (1 << 0)
+
 enum change_game_state_value
 {
   CHANGE_STATE_NONE,
@@ -42,6 +46,15 @@ enum change_game_state_value
   CHANGE_STATE_EXIT_GAME_ROBOTIC,
   CHANGE_STATE_PLAY_GAME_ROBOTIC,
   CHANGE_STATE_REQUEST_EXIT
+};
+
+enum fwrite_mode
+{
+  FWRITE_MODE_UNKNOWN,
+  FWRITE_MODE_TRUNCATE,
+  FWRITE_MODE_MODIFY,
+  FWRITE_MODE_APPEND,
+  FWRITE_MODE_MAX
 };
 
 struct world
@@ -125,6 +138,7 @@ struct world
   vfile *input_file;
   vdir *input_directory;
   boolean input_is_dir;
+  enum fwrite_mode output_mode;
   int temp_input_pos;
   int temp_output_pos;
   int commands;
@@ -144,8 +158,7 @@ struct world
 
   struct robot global_robot;
 
-  int custom_sfx_on;
-  char custom_sfx[NUM_SFX * SFX_SIZE];
+  struct sfx_list custom_sfx;
 
   // Not part of world/save files, but runtime globals
   int player_x;
@@ -196,6 +209,8 @@ struct world
   int mid_prefix;
   // 1-3 normal 5-7 is 1-3 but from a REL LAST cmd
   int last_prefix;
+  // Flags for data that persists during a command (keep in the prefix cache line).
+  int command_cache;
 
   // Lets the get counter routines indiciate to the caller
   // that the result is not a typical counter but something
@@ -233,6 +248,11 @@ struct world
   // An array for game2.cpp
   char *update_done;
   int update_done_size;
+
+  // Cached time for the current robot command.
+  struct tm current_time;
+  int64_t current_time_epoch;
+  int32_t current_time_nano;
 };
 
 __M_END_DECLS

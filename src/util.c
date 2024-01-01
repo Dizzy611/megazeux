@@ -125,9 +125,29 @@ static void out_of_memory_check(void *p, const char *file, int line)
   }
 }
 
+// Attempt to free buffered memory from the virtual filesystem for reuse.
+static boolean check_free_buffered(size_t amount, boolean *retry)
+{
+  if(!*retry || !amount)
+    return false;
+
+  if(!vio_invalidate_at_least(&amount))
+  {
+    vio_invalidate_all();
+    *retry = false;
+  }
+  return true;
+}
+
 void *check_calloc(size_t nmemb, size_t size, const char *file, int line)
 {
   void *result = calloc(nmemb, size);
+  if(!result && nmemb * size >= size)
+  {
+    boolean retry = true;
+    while(!result && check_free_buffered(nmemb * size, &retry))
+      result = calloc(nmemb, size);
+  }
   out_of_memory_check(result, file, line);
   return result;
 }
@@ -135,6 +155,12 @@ void *check_calloc(size_t nmemb, size_t size, const char *file, int line)
 void *check_malloc(size_t size, const char *file, int line)
 {
   void *result = malloc(size);
+  if(!result)
+  {
+    boolean retry = true;
+    while(!result && check_free_buffered(size, &retry))
+      result = malloc(size);
+  }
   out_of_memory_check(result, file, line);
   return result;
 }
@@ -142,6 +168,12 @@ void *check_malloc(size_t size, const char *file, int line)
 void *check_realloc(void *ptr, size_t size, const char *file, int line)
 {
   void *result = realloc(ptr, size);
+  if(!result)
+  {
+    boolean retry = true;
+    while(!result && check_free_buffered(size, &retry))
+      result = realloc(ptr, size);
+  }
   out_of_memory_check(result, file, line);
   return result;
 }
@@ -192,7 +224,8 @@ static ssize_t find_executable_dir(char *dest, size_t dest_len, const char *argv
         return strlen(dest);
     }
 
-    warn("--RES-- Failed to get executable path from argv[0]: %s\n", argv0);
+    // Might be on PATH, don't print a warning.
+    debug("--RES-- Failed to get executable path from argv[0]: %s\n", argv0);
   }
   else
     warn("--RES-- Failed to get executable path from argv[0]: (null)\n");
@@ -297,6 +330,10 @@ int mzx_res_init(const char *argv0, boolean editor)
 
     if(!mzx_res[i].path)
     {
+      // Finding this fails from installed builds in Linux, just ignore.
+      if(i == MZX_EXECUTABLE_DIR)
+        continue;
+
       if(mzx_res[i].optional)
       {
         warn("Failed to locate non-critical resource '%s'\n",
@@ -339,7 +376,11 @@ const char *mzx_res_get_by_id(enum resource_id id)
 
     // Special handling for CONFIG_TXT to allow for user
     // configuration files
+#ifdef CONFIG_PSVITA
+    snprintf(userconfpath, MAX_PATH, "%s", USERCONFFILE);
+#else
     snprintf(userconfpath, MAX_PATH, "%s/%s", getenv("HOME"), USERCONFFILE);
+#endif
 
     // Check if the file can be opened for reading
     vf = vfopen_unsafe(userconfpath, "rb");

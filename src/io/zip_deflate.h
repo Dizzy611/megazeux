@@ -41,11 +41,12 @@ struct deflate_stream_data
   boolean is_inflate;
   boolean is_deflate;
   boolean should_finish;
+  uint16_t flags;
 };
 
 static inline struct zip_stream_data *deflate_create(void)
 {
-  return ccalloc(1, sizeof(struct deflate_stream_data));
+  return (struct zip_stream_data *)calloc(1, sizeof(struct deflate_stream_data));
 }
 
 static inline void deflate_destroy(struct zip_stream_data *zs)
@@ -72,10 +73,18 @@ static inline void deflate_open(struct zip_stream_data *zs, uint16_t method,
  uint16_t flags)
 {
   struct deflate_stream_data *ds = ((struct deflate_stream_data *)zs);
+  int prev_flags = ds->flags;
   // Only clear the common portion of the stream data.
   memset(zs, 0, sizeof(struct zip_stream_data));
   zs->is_compression_stream = true;
   ds->should_finish = false;
+  ds->flags = flags & (ZIP_F_DEFLATE_MAXIMUM | ZIP_F_DEFLATE_FAST);
+
+  if(ds->is_deflate && prev_flags != ds->flags)
+  {
+    deflateEnd(&(ds->z));
+    ds->is_deflate = false;
+  }
 }
 
 static inline void deflate_close(struct zip_stream_data *zs,
@@ -199,9 +208,15 @@ static inline enum zip_error deflate_init(struct zip_stream_data *zs)
 
   if(!ds->is_deflate)
   {
+    int level = Z_DEFAULT_COMPRESSION;
+    if(ds->flags & ZIP_F_DEFLATE_MAXIMUM)
+      level = Z_BEST_COMPRESSION;
+    if(ds->flags & ZIP_F_DEFLATE_FAST)
+      level = Z_BEST_SPEED;
+
     // This is a raw deflate stream, so use -MAX_WBITS.
-    // Note: aside from the windowbits, these are all defaults.
-    deflateInit2(&(ds->z), Z_DEFAULT_COMPRESSION, Z_DEFLATED, -MAX_WBITS,
+    // Note: aside from the compression and windowbits, these are all defaults.
+    deflateInit2(&(ds->z), level, Z_DEFLATED, -MAX_WBITS,
      8, Z_DEFAULT_STRATEGY);
     ds->is_deflate = true;
   }
@@ -257,6 +272,21 @@ static inline enum zip_error deflate_block(struct zip_stream_data *zs,
       return ZIP_INPUT_EMPTY;
   }
   return ZIP_COMPRESS_FAILED;
+}
+
+static inline enum zip_error deflate_bound(struct zip_stream_data *zs,
+ size_t src_len, size_t *bound_len)
+{
+  struct deflate_stream_data *ds = (struct deflate_stream_data *)zs;
+  enum zip_error result = deflate_init(zs);
+
+  if(!bound_len)
+    return ZIP_NULL;
+  if(result)
+    return result;
+
+  *bound_len = deflateBound(&(ds->z), src_len);
+  return ZIP_SUCCESS;
 }
 
 __M_END_DECLS

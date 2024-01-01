@@ -498,6 +498,7 @@ static boolean game_idle(context *ctx)
       // The SWAP WORLD command was used by a robot.
       // TODO: the game has already been loaded at this point, but maybe
       // should be loaded here instead of in run_robot.c?
+      caption_set_world(mzx_world);
 
       // Load the new board's mod
       load_board_module(mzx_world);
@@ -1255,6 +1256,14 @@ void title_screen(context *parent)
     title->load_dialog_on_failed_load = false;
     edit_world((context *)title, true);
   }
+
+#ifdef VERSION_PRERELEASE
+  if(has_video_initialized())
+  {
+    error("Pre-release: created saves/worlds may be incompatible with future versions.",
+     ERROR_T_WARNING, ERROR_OPT_OK, 0);
+  }
+#endif
 
   clear_screen();
 }

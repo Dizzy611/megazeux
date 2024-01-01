@@ -37,6 +37,7 @@ enum
   SPRITE_CHAR_CHECK2  = (1 << 5), // CHAR_CHECK flag 2 (see below)
   SPRITE_VLAYER       = (1 << 6), // References the vlayer
   SPRITE_UNBOUND      = (1 << 7), // Uses pixel positioning and collision
+  SPRITE_OFF_ON_EXIT  = (1 << 8), // Turn off sprite when switching boards
 
   // Internal flag combination for pixel collision.
   SPRITE_PIXCHECK     = SPRITE_UNBOUND | SPRITE_CHAR_CHECK | SPRITE_CHAR_CHECK2,
@@ -64,7 +65,7 @@ enum
 void plot_sprite(struct world *mzx_world, struct sprite *cur_sprite, int color,
  int x, int y);
 void draw_sprites(struct world *mzx_world);
-boolean sprite_at_xy(struct sprite *cur_sprite, int x, int y);
+boolean sprite_at_xy(struct world *mzx_world, struct sprite *cur_sprite, int x, int y);
 int sprite_colliding_xy(struct world *mzx_world, struct sprite *check_sprite,
  int x, int y);
 

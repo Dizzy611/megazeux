@@ -252,7 +252,7 @@ void init_audio(struct config_info *conf)
 #endif
 
   audio.output_frequency = conf->output_frequency;
-  audio.master_resample_mode = conf->resample_mode;
+  audio.global_resample_mode = conf->resample_mode;
 
   audio.max_simultaneous_samples = -1;
   audio.max_simultaneous_samples_config = conf->max_simultaneous_samples;
@@ -263,6 +263,16 @@ void init_audio(struct config_info *conf)
   init_vorbis(conf);
 #endif
 
+#ifdef CONFIG_REALITY
+  init_reality(conf);
+#endif
+
+  // Generic module players may misidentify files due to the ambiguity of
+  // formats like Soundtracker MOD, so register them last.
+#ifdef CONFIG_XMP
+  init_xmp(conf);
+#endif
+
 #ifdef CONFIG_MODPLUG
   init_modplug(conf);
 #endif
@@ -271,16 +281,8 @@ void init_audio(struct config_info *conf)
   init_mikmod(conf);
 #endif
 
-#ifdef CONFIG_XMP
-  init_xmp(conf);
-#endif
-
 #ifdef CONFIG_OPENMPT
   init_openmpt(conf);
-#endif
-
-#ifdef CONFIG_REALITY
-  init_reality(conf);
 #endif
 
   audio_set_music_volume(conf->music_volume);
@@ -412,7 +414,7 @@ static void limit_samples(int max)
   struct audio_stream *next_astream;
 
   // Don't limit samples if the max samples setting is -1.
-  if(max == -1)
+  if(max < 0)
     return;
 
   LOCK();
